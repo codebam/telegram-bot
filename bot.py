@@ -1,17 +1,17 @@
 #!/usr/bin/env python
 
+import telegram
 import sys
 import os
-sys.path.append(os.path.join(os.path.abspath('.'), 'venv/lib/python2.7/site-packages'))
-
-import telegram
 from flask import Flask, request
+sys.path.append(os.path.join(os.path.abspath('.'), 'venv/lib/python2.7/site-packages'))
 
 app = Flask(__name__)
 
-global bot
 file_ = open('token')
 token_=file_.read().rstrip('\n')
+
+global bot
 bot = telegram.Bot(token=token_)
 
 

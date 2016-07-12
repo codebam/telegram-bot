@@ -4,16 +4,17 @@ from telegram.ext import Updater
 from telegram.ext import CommandHandler
 #logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 shutUp = False
-#209977494:AAFuxQTAxpeA3w4bvAhUuSzcwEsPtRadhV4
-updater = Updater(token='213230071:AAHOBUOJ2H5RC_eqvoASNLWy7_JQnlswNEQ')
-#updater = Updater(token='209977494:AAFuxQTAxpeA3w4bvAhUuSzcwEsPtRadhV4') #alterego
-
+file_ = open('token')
+# token is a file used to hide my token from git
+# it contains one line with my token
+updater = Updater(token=file_.read().rstrip('\n')
+)
 
 
 dispatcher = updater.dispatcher
 
 def start(bot, update):
-    bot.sendMessage(chat_id=update.message.chat_id,text="Hi there. IcarusAnnouncerBot here, bringing you the latest news from the ICARUS Network.")
+    bot.sendMessage(chat_id=update.message.chat_id,text="Hello, I'm your friendly community Penguin. Issue me commands, it's not like I have a choice!")
 
 def repl(bot,update):
     go = True
@@ -26,7 +27,7 @@ def nag(bot, update):
     time.sleep(100)
     bot.sendMessage(chat_id=update.message.chat_id, text="Obama says: Remember, personal hygene is always important in a Capitalist society.")
 
-def realismMode(bot,update):    
+def realismMode(bot,update):
     while True:
         bot.sendMessage(chat_id=update.message.chat_id, text="Will you mary me?")
         time.sleep(5)
