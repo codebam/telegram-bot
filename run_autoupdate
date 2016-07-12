@@ -1,0 +1,21 @@
+#!/bin/bash
+
+bot_dir=/home/swb1998/telegram-bot/
+cd $bot_dir
+python $bot_dir/main.py &
+bot_pid=$!
+while [ true ]
+do
+        sleep 60
+        LOCAL=$(git rev-parse @)
+        REMOTE=$(git rev-parse @{u})
+        BASE=$(git merge-base @ @{u})
+        if [ $LOCAL = $REMOTE ]; then
+                a=""                                                                                                                                     
+        elif [ $LOCAL = $BASE ]; then
+                git pull github master
+                kill bot_pid
+                python $bot_dir/main.py &
+                bot_pid=$!
+        fi
+done
