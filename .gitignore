@@ -1,6 +1,9 @@
 # My Token
 token
 
+# Talk file
+talk
+
 # ---> Python
 # Byte-compiled / optimized / DLL files
 __pycache__/

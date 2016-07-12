@@ -31,12 +31,14 @@ def say_something(bot,update):
     bot.sendMessage(chat_id=update.message.chat_id, text="something")
 
 def talk(bot, update):
-    while True
-        time.sleep(1)
-        for line in fh:
-            pass
-        lastline = line
-    bot.sendMessage(chat_id=update.message.chat_id, text=lastline)
+    fname='talk'
+    with open(fname, 'rb') as fh:
+        while True
+            time.sleep(1)
+            for line in fh:
+                pass
+            lastline = line
+        bot.sendMessage(chat_id=update.message.chat_id, text=lastline)
 
 def desu(bot, update):
     bot.sendMessage(chat_id=update.message.chat_id, text="desu~")

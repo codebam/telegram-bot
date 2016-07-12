@@ -12,8 +12,9 @@ do
         REMOTE=$(git rev-parse @{u})
         BASE=$(git merge-base @ @{u})
         if [ $LOCAL = $REMOTE ]; then
-                a=""                                                                                                                                     
+                echo Up to date
         elif [ $LOCAL = $BASE ]; then
+                echo Updating...
                 git pull github master
                 kill bot_pid
                 python $bot_dir/main.py &
