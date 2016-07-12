@@ -9,6 +9,12 @@ from telegram import InlineQueryResultArticle, ParseMode, \
     InputTextMessageContent
 from telegram.ext import Updater, InlineQueryHandler, CommandHandler, MessageHandler, Filters
 
+# Local Modules
+
+import inline_query
+import escape_markdown
+import echo
+
 
 def start(bot, update):
     bot.sendMessage(chat_id=update.message.chat_id,text="Hello, I'm your friendly community Penguin. Issue me commands, it's not like I have a choice!")
@@ -32,7 +38,7 @@ def main():
     dp.add_handler(CommandHandler('start', start))
     dp.add_handler(CommandHandler('help', help))
 
-    dp.add_handler(InlineQueryHandler(inlinequery))
+    dp.add_handler(InlineQueryHandler(inline_query))
 
     echo_handler = MessageHandler([Filters.text], echo)
     dp.add_handler(echo_handler)
