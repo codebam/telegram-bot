@@ -27,16 +27,8 @@ def nag(bot, update):
     time.sleep(100)
     bot.sendMessage(chat_id=update.message.chat_id, text="Obama says: Remember, personal hygene is always important in a Capitalist society.")
 
-def realismMode(bot,update):
-    while True:
-        bot.sendMessage(chat_id=update.message.chat_id, text="Will you mary me?")
-        time.sleep(5)
-        bot.sendMessage(chat_id=update.message.chat_id, text="You are under arrest under section 503c of the PROTECT act")
-        time.sleep(2)
-        bot.sendMessage(chat_id=update.message.chat_id, text="for the illegal distribution of child ponography")
-        time.sleep(5)
-        bot.sendMessage(chat_id=update.message.chat_id, text="desu~")
-        time.sleep(3)
+def say_something(bot,update):
+    bot.sendMessage(chat_id=update.message.chat_id, text="something")
 
 def desu(bot, update):
     bot.sendMessage(chat_id=update.message.chat_id, text="desu~")
@@ -45,7 +37,7 @@ def stop(bot, update):
     True
 dispatcher.add_handler(CommandHandler('start',start))
 dispatcher.add_handler(CommandHandler('callThePresident', nag))
-dispatcher.add_handler(CommandHandler('realismMode', realismMode))
+dispatcher.add_handler(CommandHandler('say_something', say_something))
 dispatcher.add_handler(CommandHandler('converse', repl))
 
 updater.start_polling()
