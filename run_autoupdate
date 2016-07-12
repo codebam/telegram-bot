@@ -4,6 +4,7 @@ bot_dir=/home/swb1998/telegram-bot/
 cd $bot_dir
 python $bot_dir/main.py &
 bot_pid=$!
+echo $bot_pid
 while [ true ]
 do
         sleep 60
