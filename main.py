@@ -30,6 +30,14 @@ def nag(bot, update):
 def say_something(bot,update):
     bot.sendMessage(chat_id=update.message.chat_id, text="something")
 
+def talk(bot, update):
+    while True
+        time.sleep(1)
+        for line in fh:
+            pass
+        lastline = line
+    bot.sendMessage(chat_id=update.message.chat_id, text=lastline)
+
 def desu(bot, update):
     bot.sendMessage(chat_id=update.message.chat_id, text="desu~")
 
@@ -39,6 +47,7 @@ dispatcher.add_handler(CommandHandler('start',start))
 dispatcher.add_handler(CommandHandler('callThePresident', nag))
 dispatcher.add_handler(CommandHandler('say_something', say_something))
 dispatcher.add_handler(CommandHandler('converse', repl))
+dispatcher.add_handler(CommandHandler('talk', talk))
 
 updater.start_polling()
 
