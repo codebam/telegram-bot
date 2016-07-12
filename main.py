@@ -1,55 +1,45 @@
-import logging
+#!/usr/bin/env python3
+from uuid import uuid4
+
 import time
-from telegram.ext import Updater
-from telegram.ext import CommandHandler
-#logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-shutUp = False
-file_ = open('token')
-# token is a file used to hide my token from git
-# it contains one line with my token
-updater = Updater(token=file_.read().rstrip('\n')
-)
+import re
+import json
 
+from telegram import InlineQueryResultArticle, ParseMode, \
+    InputTextMessageContent
+from telegram.ext import Updater, InlineQueryHandler, CommandHandler, MessageHandler, Filters
 
-dispatcher = updater.dispatcher
 
 def start(bot, update):
     bot.sendMessage(chat_id=update.message.chat_id,text="Hello, I'm your friendly community Penguin. Issue me commands, it's not like I have a choice!")
 
-def repl(bot,update):
-    go = True
-    bot.sendMessage(chat_id=update.message.chat_id, text="Hi, I'm your daughter!!")
-    while go:
-        textmsg = raw_input("TALK>> ")
-        bot.sendMessage(chat_id=update.message.chat_id, text=textmsg)
 
-def nag(bot, update):
-    time.sleep(100)
-    bot.sendMessage(chat_id=update.message.chat_id, text="Obama says: Remember, personal hygene is always important in a Capitalist society.")
+def help(bot, update):
+    bot.sendMessage(update.message.chat_id, text='Help!')
 
-def say_something(bot,update):
-    bot.sendMessage(chat_id=update.message.chat_id, text="something")
 
-def talk(bot, update):
-    fname='talk'
-    with open(fname, 'rb') as fh:
-        while True
-            time.sleep(1)
-            for line in fh:
-                pass
-            lastline = line
-        bot.sendMessage(chat_id=update.message.chat_id, text=lastline)
+def main():
+    file_ = open('token')
+    try:
+        token_=file_.read().rstrip('\n')
+    finally:
+        file_.close()
+    # token is a file used to hide my token from git
+    # it contains one line with my token
 
-def desu(bot, update):
-    bot.sendMessage(chat_id=update.message.chat_id, text="desu~")
+    updater = Updater(token=token_)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler('start', start))
+    dp.add_handler(CommandHandler('help', help))
 
-def stop(bot, update):
-    True
-dispatcher.add_handler(CommandHandler('start',start))
-dispatcher.add_handler(CommandHandler('callThePresident', nag))
-dispatcher.add_handler(CommandHandler('say_something', say_something))
-dispatcher.add_handler(CommandHandler('converse', repl))
-dispatcher.add_handler(CommandHandler('talk', talk))
+    dp.add_handler(InlineQueryHandler(inlinequery))
 
-updater.start_polling()
+    echo_handler = MessageHandler([Filters.text], echo)
+    dp.add_handler(echo_handler)
 
+    updater.start_polling()
+
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
