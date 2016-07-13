@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
-from uuid import uuid4
 
 import time
 import re
 import json
 
+from uuid import uuid4
 from telegram import InlineQueryResultArticle, ParseMode, \
     InputTextMessageContent
 from telegram.ext import Updater, InlineQueryHandler, CommandHandler, MessageHandler, Filters
-
-# Local Modules
-
-import inline_query
-import escape_markdown
-import echo
 
 
 def start(bot, update):
@@ -22,6 +16,10 @@ def start(bot, update):
 
 def help(bot, update):
     bot.sendMessage(update.message.chat_id, text='Help!')
+
+
+def debug(bot, update, args):
+    bot.sendMessage(update.message.chat_id, text=str(args))
 
 
 def main():
@@ -37,14 +35,20 @@ def main():
     dp = updater.dispatcher
     dp.add_handler(CommandHandler('start', start))
     dp.add_handler(CommandHandler('help', help))
+    dp.add_handler(CommandHandler('debug-'+token_, debug, pass_args=True))
 
-    dp.add_handler(InlineQueryHandler(inline_query))
 
-    echo_handler = MessageHandler([Filters.text], echo)
+    # Local Modules
+    from modules import inline_query
+    from modules import escape_markdown
+    dp.add_handler(InlineQueryHandler(inline_query.inline_query))
+
+    from modules import echo
+    echo_handler = MessageHandler([Filters.text], echo.echo)
     dp.add_handler(echo_handler)
+    # ---
 
     updater.start_polling()
-
     updater.idle()
 
 if __name__ == '__main__':
