@@ -16,7 +16,7 @@ do
         elif [ $LOCAL = $BASE ]; then
                 echo Updating...
                 git pull github master
-                kill bot_pid
+                kill $bot_pid
                 python $bot_dir/main.py &
                 bot_pid=$!
         fi
