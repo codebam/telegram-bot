@@ -46,6 +46,9 @@ def main():
     from modules import echo
     echo_handler = MessageHandler([Filters.text], echo.echo)
     dp.add_handler(echo_handler)
+
+    from modules import say_something
+    dp.add_handler(CommandHandler('say_something', say_something.say_something))
     # ---
 
     updater.start_polling()
