@@ -39,16 +39,16 @@ def main():
 
 
     # Local Modules
-    from modules import inline_query
-    from modules import escape_markdown
-    dp.add_handler(InlineQueryHandler(inline_query.inline_query))
+    from modules.inline_query import inline_query
+    from modules.escape_markdown import escape_markdown
+    dp.add_handler(InlineQueryHandler(inline_query))
 
-    from modules import echo
-    echo_handler = MessageHandler([Filters.text], echo.echo)
+    from modules.echo import echo
+    echo_handler = MessageHandler([Filters.text], echo)
     dp.add_handler(echo_handler)
 
-    from modules import say_something
-    dp.add_handler(CommandHandler('say_something', say_something.say_something))
+    from modules.say_something import say_something
+    dp.add_handler(CommandHandler('say_something', say_something))
     # ---
 
     updater.start_polling()
