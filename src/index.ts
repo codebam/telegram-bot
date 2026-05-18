@@ -782,6 +782,42 @@ export class AIWorkflow extends WorkflowEntrypoint<Environment, any> {
 
 export default {
 	async fetch(request: Request, env: Environment, executionCtx: ExecutionContext): Promise<Response> {
+		const url = new URL(request.url);
+		console.log(`[Fetch] Incoming request: ${request.method} ${url.href} (hostname: ${url.hostname})`);
+
+		if (url.hostname === 'workflow.local' || url.pathname === '/workflow') {
+			console.log('[Fetch] Matches task endpoint, processing task...');
+			const task = (await request.json()) as Task;
+			console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
+
+			const messages = [
+				{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
+				...(task.history || []),
+				{ role: 'user', content: task.prompt },
+			];
+
+			const tools = [fetchTool, wikipediaTool, createTavilySearchTool(env.TAVILY_API_KEY)];
+
+			const aiResponse = (await customRunWithTools(
+				env.AI,
+				task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8',
+				{ messages, tools: task.type === 'tool_call' ? tools : [] },
+				{ streamFinalResponse: task.stream || false },
+			)) as any;
+
+			if (task.stream && aiResponse && typeof aiResponse.getReader === 'function') {
+				console.log('[Fetch] Returning streaming response');
+				return new Response(aiResponse, {
+					headers: { 'Content-Type': 'text/event-stream' },
+				});
+			}
+
+			console.log('[Fetch] Returning JSON response');
+			return new Response(JSON.stringify(aiResponse), {
+				headers: { 'Content-Type': 'application/json' },
+			});
+		}
+
 		const bot = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN);
 		setupBot(bot, env, executionCtx);
 
@@ -827,6 +863,11 @@ export default {
 		}
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		return (webhookCallback(bot, 'cloudflare-mod', {
+			onTimeout: 'return',
+		}) as any)(request, env, executionCtx);
+	},
+};
+re-mod', {
 			onTimeout: 'return',
 		}) as any)(request, env, executionCtx);
 	},
