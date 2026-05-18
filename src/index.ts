@@ -295,6 +295,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 						messages,
 						{
 							type: ctx.update.business_message ? 'business_message' : 'message',
+							updateType: ctx.update.business_message ? 'business_message' : 'message',
 							prompt,
 							chatId: ctx.chat?.id.toString(),
 							threadId,
