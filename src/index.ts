@@ -770,9 +770,13 @@ export default {
 	async fetch(request: Request, env: Environment, executionCtx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const xSource = request.headers.get('x-source');
+		const xPassword = request.headers.get('x-password');
 		console.log(`[Fetch] Incoming request: ${request.method} ${url.href} (hostname: ${url.hostname}, source: ${xSource})`);
 
 		if (url.hostname === 'workflow.local' || url.pathname === '/workflow' || xSource === 'webapp') {
+			if (xPassword !== env.SECRET_TELEGRAM_API_TOKEN) {
+				return new Response('Unauthorized', { status: 401 });
+			}
 			console.log('[Fetch] Matches task endpoint, processing task...');
 			const task = (await request.json()) as Task;
 			console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
