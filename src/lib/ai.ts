@@ -203,6 +203,10 @@ export async function customRunWithTools(
 			}
 		}
 
+		return await runModel(messages, config.streamFinalResponse);
+	}
+
+	if (config.streamFinalResponse) {
 		return await runModel(messages, true);
 	}
 

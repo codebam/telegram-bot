@@ -806,9 +806,20 @@ export default {
 				{ streamFinalResponse: task.stream || false },
 			)) as any;
 
-			if (task.stream && aiResponse && typeof aiResponse.getReader === 'function') {
-				console.log('[Fetch] Returning streaming response');
-				return new Response(aiResponse, {
+			console.log(`[Fetch] aiResponse type: ${typeof aiResponse}, constructor: ${aiResponse?.constructor?.name}`);
+
+			let stream = null;
+			if (aiResponse instanceof ReadableStream) {
+				stream = aiResponse;
+			} else if (aiResponse && aiResponse.body instanceof ReadableStream) {
+				stream = aiResponse.body;
+			} else if (aiResponse && typeof aiResponse.getReader === 'function') {
+				stream = aiResponse;
+			}
+
+			if (task.stream && stream) {
+				console.log(`[Fetch] Returning streaming response. Locked: ${stream.locked}`);
+				return new Response(stream, {
 					headers: { 'Content-Type': 'text/event-stream' },
 				});
 			}
