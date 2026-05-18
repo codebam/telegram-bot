@@ -660,6 +660,8 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 export class AIWorkflow extends WorkflowEntrypoint<Environment, any> {
 	async run(event: WorkflowEvent<any>, step: WorkflowStep): Promise<void> {
 		const task = event.payload;
+		console.log('[Workflow] Starting run for task type:', task.type);
+		console.log('[Workflow] Task Details:', JSON.stringify(task));
 		const env = this.env;
 
 		const config = await step.do('Initialize Context', async () => {
