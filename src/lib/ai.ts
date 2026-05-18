@@ -25,7 +25,7 @@ export function extractText(obj: string | AiResponse | any): string {
 		return extractText(response.choices[0]);
 	if (response.message) return extractText(response.message);
 	if (response.delta) return extractText(response.delta);
-	if (response.tool_calls) return ''; // Skip tool calls in extraction for now
+	if (response.tool_calls) return ''; // Skip tool calls in extraction
 	if (response.candidates && Array.isArray(response.candidates) && response.candidates.length > 0)
 		return extractText(response.candidates[0]);
 	if (response.content) return extractText(response.content);
@@ -58,23 +58,6 @@ export async function customRunWithTools(
 		}
 	}));
 
-	if (tools.length > 0) {
-		let systemMsg = messages.find((m) => m.role === 'system');
-		if (!systemMsg) {
-			systemMsg = { role: 'system', content: '' };
-			messages.unshift(systemMsg);
-		}
-		const toolInstructions = tools
-			.map((t: Tool) => {
-				return `- Name: ${t.name}\n  Description: ${t.description}\n  Parameters: ${JSON.stringify(t.parameters)}`;
-			})
-			.join('\n');
-
-		const promptInstruction = `\n\n[SYSTEM INSTRUCTION] You have access to the following tools:\n${toolInstructions}\n\nTo use a tool, you MUST output a tool call wrapped in XML format, like so:\n<tool_call>{"name": "tavily_search", "arguments": {"query": "query" }}</tool_call>\nor\n<tool_call>{"name": "wikipedia", "arguments": {"query": "query" }}</tool_call>\n\nMake sure the tool call is outputted EXACTLY as shown. The system will intercept this call, execute the tool, and return the output to you. Do not write code or direct the user to run code; call the tools yourself.`;
-
-		systemMsg.content = systemMsg.content + promptInstruction;
-	}
-
 	const runModel = async (msgs: any[], stream: boolean) => {
 		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}`);
 		try {
@@ -86,6 +69,7 @@ export async function customRunWithTools(
 						role: m.role === 'assistant' ? 'model' : 'user',
 						parts: [{ text: m.content as string }]
 					})),
+					tools: cfTools.length > 0 ? [{ function_declarations: cfTools.map(t => t.function) }] : undefined,
 					stream
 				};
 				if (systemMessage) {
@@ -98,7 +82,6 @@ export async function customRunWithTools(
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
 			}
-			console.log(`[customRunWithTools] Calling ai.run (Workers AI) with ${msgs.length} messages and ${cfTools.length} tools...`);
 			
 			const options: any = {
 				messages: msgs,
@@ -108,6 +91,7 @@ export async function customRunWithTools(
 				tool_choice: 'auto'
 			};
 
+			console.log(`[customRunWithTools] Calling ai.run (Workers AI) with ${msgs.length} messages and ${cfTools.length} tools...`);
 			const res = await ai.run(model, options);
 			console.log('[customRunWithTools] ai.run (Workers AI) call returned.');
 			return res;
@@ -121,10 +105,7 @@ export async function customRunWithTools(
 	while (turn < 5) {
 		console.log(`[customRunWithTools] Starting turn ${turn + 1}...`);
 		
-		// If this is the last turn or no tools, and we want streaming, then stream.
-		// For tool detection, we MUST NOT stream.
 		const shouldStream = turn === 4 || cfTools.length === 0 ? config.streamFinalResponse : false;
-		
 		const response = await runModel(messages, shouldStream);
 		
 		if (shouldStream) {
@@ -141,62 +122,6 @@ export async function customRunWithTools(
 		}
 
 		let responseText = aiRes?.response || aiRes?.choices?.[0]?.message?.content || '';
-
-		if (toolCalls.length === 0) {
-			const gemmaRegex = /<\|tool_call>\s*call:\s*([a-zA-Z0-9_]+)([\s\S]*?)<tool_call\|>/g;
-			const standardRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
-			const markdownRegex = /```json\s*<tool_call>\s*([\s\S]*?)\s*<\/tool_call>\s*```/g;
-
-			let match;
-			while ((match = gemmaRegex.exec(responseText)) !== null) {
-				let name = match[1].trim();
-				if (name === 'http_fetch' || name === 'api_fetch') {
-					name = 'fetch';
-				}
-
-				let argsString = match[2].trim();
-				argsString = argsString
-					.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
-					.replace(/:\s*'([^']*)'/g, ': "$1"');
-
-				toolCalls.push({
-					id: `call_${Math.random().toString(36).substring(2, 9)}`,
-					type: 'function',
-					function: { name, arguments: argsString }
-				});
-			}
-
-			const processStandardMatch = (content: string) => {
-				try {
-					// Clean up potential backticks and language identifiers
-					const cleaned = content.trim().replace(/^```json\s*/, '').replace(/\s*```$/, '');
-					const parsed = JSON.parse(cleaned.replace(/'/g, '"'));
-					const name = parsed.name || 'fetch';
-					const args = parsed.arguments || parsed;
-					toolCalls.push({
-						id: `call_${Math.random().toString(36).substring(2, 9)}`,
-						type: 'function',
-						function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) }
-					});
-				} catch (e) {
-					console.error('Failed to parse tool call:', content, e);
-				}
-			};
-
-			while ((match = markdownRegex.exec(responseText)) !== null) {
-				processStandardMatch(match[1]);
-			}
-
-			while ((match = standardRegex.exec(responseText)) !== null) {
-				processStandardMatch(match[1]);
-			}
-
-			responseText = responseText
-				.replace(/```json\s*<tool_call>[\s\S]*?<\/tool_call>\s*```/g, '')
-				.replace(/<\|tool_call>[\s\S]*?<tool_call\|>/g, '')
-				.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
-				.trim();
-		}
 
 		if (toolCalls.length > 0) {
 			console.log(`[customRunWithTools] Found ${toolCalls.length} tool calls.`);
@@ -249,7 +174,6 @@ export async function customRunWithTools(
 					messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: 'Tool not found' });
 				}
 			}
-			// Continue to next turn
 		} else {
 			console.log('[customRunWithTools] No more tool calls. Finishing...');
 			if (config.streamFinalResponse) {
