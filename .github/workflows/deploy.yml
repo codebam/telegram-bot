@@ -3,12 +3,27 @@ name: Deploy Bot
 on:
   push:
     branches:
+      - main
       - master
-      - bot-migration
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Default to 'prod' for tags, 'dev' for pushes to main/master,
+    # and allow manual override via workflow_dispatch.
+    environment: ${{ inputs.environment || (github.ref_type == 'tag' && 'prod' || 'dev') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -21,6 +36,8 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Use 'dev' environment in wrangler.toml if the GitHub environment is 'dev'
+          environment: ${{ (inputs.environment || (github.ref_type == 'tag' && 'prod' || 'dev')) == 'dev' && 'dev' || '' }}
           secrets: |
             SECRET_TELEGRAM_API_TOKEN
             TAVILY_API_KEY
