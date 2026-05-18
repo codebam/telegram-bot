@@ -91,9 +91,7 @@ export async function customRunWithTools(
 						parts: [{ text: systemMessage.content as string }]
 					};
 				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
-				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
 			}
 			
@@ -105,9 +103,7 @@ export async function customRunWithTools(
 				tool_choice: 'auto'
 			};
 
-			console.log(`[customRunWithTools] Calling ai.run (Workers AI) with ${msgs.length} messages and ${cfTools.length} tools...`);
 			const res = await ai.run(model, options);
-			console.log('[customRunWithTools] ai.run (Workers AI) call returned.');
 			return res;
 		} catch (e) {
 			console.error(`[customRunWithTools] ai.run failed for model ${model}:`, e);
@@ -117,13 +113,10 @@ export async function customRunWithTools(
 
 	let turn = 0;
 	while (turn < 5) {
-		console.log(`[customRunWithTools] Starting turn ${turn + 1}...`);
-		
 		const shouldStream = turn === 4 || cfTools.length === 0 ? config.streamFinalResponse : false;
 		const response = await runModel(messages, shouldStream);
 		
 		if (shouldStream || response instanceof ReadableStream) {
-			console.log('[customRunWithTools] Returning streaming response.');
 			return response;
 		}
 
@@ -155,7 +148,6 @@ export async function customRunWithTools(
 		let responseText = extractText(aiRes);
 
 		if (toolCalls.length > 0) {
-			console.log(`[customRunWithTools] Found ${toolCalls.length} tool calls.`);
 			const normalizedToolCalls = toolCalls.map((call: any, index: number) => {
 				const name = call.name || (call.function && call.function.name);
 				let args = call.arguments || (call.function && call.function.arguments);
@@ -187,7 +179,6 @@ export async function customRunWithTools(
 				const tool = tools.find((t: Tool) => t.name === toolName);
 
 				if (tool && tool.function) {
-					console.log(`[customRunWithTools] Executing tool: ${toolName}`);
 					try {
 						let parsedArgs;
 						try {
@@ -196,7 +187,6 @@ export async function customRunWithTools(
 							parsedArgs = toolArgsString;
 						}
 						const result = await tool.function(parsedArgs);
-						console.log(`[customRunWithTools] Tool ${toolName} execution successful.`);
 						const content = typeof result === 'string' ? result : JSON.stringify(result);
 						
 						const toolMessage: any = { role: 'tool', tool_call_id: toolId, name: toolName, content };
@@ -238,9 +228,7 @@ export async function customRunWithTools(
 				}
 			}
 		} else {
-			console.log('[customRunWithTools] No more tool calls. Finishing...');
 			if (config.streamFinalResponse) {
-				console.log('[customRunWithTools] Re-running final model call for streaming...');
 				return await runModel(messages, true);
 			}
 			return aiRes;
