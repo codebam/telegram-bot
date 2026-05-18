@@ -157,10 +157,10 @@ async function chargeStars(
 	}
 
 	task.userId = userId;
-	task.senderId = ctx.from?.id;
-	task.chatId = ctx.chat?.id.toString();
+	task.senderId = ctx.from?.id || (ctx.update as any).guest_message?.from?.id;
+	task.chatId = ctx.chat?.id.toString() || (ctx.update as any).guest_message?.chat?.id?.toString();
 	task.updateId = ctx.update.update_id;
-	task.messageId = ctx.message?.message_id ?? ctx.update.business_message?.message_id;
+	task.messageId = ctx.message?.message_id ?? ctx.update.business_message?.message_id ?? (ctx.update as any).guest_message?.message_id;
 	task.updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	task.guestQueryId = (ctx.update as any).guest_message?.guest_query_id;
