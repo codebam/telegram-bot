@@ -653,7 +653,36 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 				prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
 			}
 		}
-		await chargeStars(ctx, { type: 'message', prompt });
+
+		if (prompt.includes('/start')) {
+			await ctx.reply(
+				'Welcome! Here are my commands:\n' +
+					'/balance - Check your current Star balance\n' +
+					'/load <amount> - Top up your balance with Telegram Stars\n' +
+					'/photo <prompt> - Generate an image (100 Stars)\n' +
+					'/model <name> - Switch AI model and see costs\n' +
+					'/ttl <1-5> - Set the TTL for bot-to-bot responses\n' +
+					'/code <prompt> - Generate code snippets\n' +
+					'/prompt <"prompt"> - Set your custom system prompt (use "" or reset to clear)\n' +
+					'/facts <"facts"> - Set facts about yourself for business mode (use "" or reset to clear)\n' +
+					'/request <prompt> - Make arbitrary API requests (uses fetch tool)\n' +
+					'<prompt> - Generate text (may use tools if supported by model)\n' +
+					'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
+					'/clear - Clear your conversation history\n\n' +
+					'New users start with 200 free credits!\n\n' +
+					'Click the button below to open the Web App!',
+				{
+					reply_markup: {
+						inline_keyboard: [
+							[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }],
+						],
+					},
+				},
+			);
+			return;
+		}
+
+		await chargeStars(ctx, env, executionCtx, { type: 'message', prompt });
 	});
 }
 
