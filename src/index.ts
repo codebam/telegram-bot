@@ -677,7 +677,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 					},
 					reply_markup: {
 						inline_keyboard: [
-							[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }],
+							[{ text: 'Open Web App', url: 'https://tux-robot.codebam.ca' }],
 						],
 					},
 				});
