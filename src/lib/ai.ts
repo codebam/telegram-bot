@@ -68,9 +68,56 @@ export async function customRunWithTools(
 					contents: otherMessages.map((m) => {
 						let role = m.role === 'assistant' ? 'model' : 'user';
 						const parts: any[] = [];
-						if (m.content) parts.push({ text: m.content });
+						
+						if (m.role === 'tool') {
+							role = 'function';
+							parts.push({
+								functionResponse: {
+									name: m.name,
+									response: { content: m.content }
+								}
+							});
+						} else {
+							if (m.content) parts.push({ text: m.content });
+							if (m.tool_calls) {
+								for (const call of m.tool_calls) {
+									try {
+										const args = typeof call.function.arguments === 'string' 
+											? JSON.parse(call.function.arguments) 
+											: call.function.arguments;
+										parts.push({
+											functionCall: {
+												name: call.function.name,
+												args
+											}
+										});
+									} catch (e) {
+										console.error('[customRunWithTools] Failed to parse Gemini tool call args:', call.function.arguments, e);
+									}
+								}
+							}
+						}
 						return { role, parts };
 					}),
+					// Try with only one simple tool to isolate 1101
+					tools: cfTools.length > 0 ? [{
+						function_declarations: cfTools.filter(t => t.function.name === 'wikipedia').map(t => {
+							const params = JSON.parse(JSON.stringify(t.function.parameters));
+							params.type = 'OBJECT';
+							if (params.properties) {
+								for (const key of Object.keys(params.properties)) {
+									if (params.properties[key].type) {
+										params.properties[key].type = params.properties[key].type.toUpperCase();
+									}
+								}
+							}
+							return {
+								name: t.function.name,
+								description: t.function.description,
+								parameters: params
+							};
+						})
+					}] : undefined,
 					stream
 				};
 				if (systemMessage) {
@@ -78,7 +125,7 @@ export async function customRunWithTools(
 						parts: [{ text: systemMessage.content as string }]
 					};
 				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.21 (no tools, with system) with input:', JSON.stringify(geminiInput));
+				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.22 (wiki only) with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
