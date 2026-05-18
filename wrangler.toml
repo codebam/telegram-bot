@@ -23,6 +23,9 @@ queue = "tux-robot-messages"
 max_batch_size = 10
 max_batch_timeout = 5
 
+[sandbox]
+binding = "Sandbox"
+
 [env.dev]
 name = "tux-robot-dev"
 
@@ -46,6 +49,9 @@ queue = "tux-robot-messages-dev"
 max_batch_size = 10
 max_batch_timeout = 5
 
+[env.dev.sandbox]
+binding = "Sandbox"
+
 [env.production]
 name = "tux-robot"
 
@@ -68,3 +74,6 @@ queue = "tux-robot-messages"
 queue = "tux-robot-messages"
 max_batch_size = 10
 max_batch_timeout = 5
+
+[env.production.sandbox]
+binding = "Sandbox"

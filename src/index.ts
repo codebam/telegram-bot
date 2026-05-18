@@ -5,7 +5,7 @@ import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment } from '@codebam/shared';
-import { fetchTool, wikipediaTool, createTavilySearchTool } from './lib/utils.js';
+import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
 type BaseContext = CommandsFlavor &
@@ -306,7 +306,12 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 							history,
 							telegramToken: env.SECRET_TELEGRAM_API_TOKEN,
 						},
-						[fetchTool, wikipediaTool, createTavilySearchTool(env.TAVILY_API_KEY || '')],
+						[
+							fetchTool,
+							wikipediaTool,
+							createTavilySearchTool(env.TAVILY_API_KEY || ''),
+							createSandboxTool(env.Sandbox, String(userId)),
+						],
 					);
 
 					if (responseContent) {
@@ -529,7 +534,11 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			await ctx.reply('Please provide a request. Example: /request what is the weather in San Francisco?');
 			return;
 		}
-		await chargeStars(ctx, { type: 'tool_call', prompt, tools: [fetchTool, wikipediaTool] });
+		await chargeStars(ctx, {
+			type: 'tool_call',
+			prompt,
+			tools: [fetchTool, wikipediaTool, createSandboxTool(ctx.env.Sandbox, String(ctx.from?.id))],
+		});
 	});
 
 	bot.use(commands);
@@ -754,7 +763,12 @@ export default {
 					modelId,
 					messages,
 					task,
-					[fetchTool, wikipediaTool, createTavilySearchTool(env.TAVILY_API_KEY || '')],
+					[
+						fetchTool,
+						wikipediaTool,
+						createTavilySearchTool(env.TAVILY_API_KEY || ''),
+						createSandboxTool(env.Sandbox, String(task.userId)),
+					],
 				);
 
 				if (task.userId && responseContent) {
@@ -787,7 +801,12 @@ export default {
 				{ role: 'user', content: task.prompt },
 			];
 
-			const tools = [fetchTool, wikipediaTool, createTavilySearchTool(env.TAVILY_API_KEY || '')];
+			const tools = [
+				fetchTool,
+				wikipediaTool,
+				createTavilySearchTool(env.TAVILY_API_KEY || ''),
+				createSandboxTool(env.Sandbox, String(task.userId)),
+			];
 
 			const aiResponse = (await customRunWithTools(
 				env.AI,
