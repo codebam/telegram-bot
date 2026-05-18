@@ -70,7 +70,7 @@ export async function customRunWithTools(
 						const parts: any[] = [];
 						
 						if (m.role === 'tool') {
-							role = 'function';
+							role = 'model'; // Gemini often uses 'model' role for function response parts too, or 'function'
 							parts.push({
 								functionResponse: {
 									name: m.name,
@@ -103,11 +103,11 @@ export async function customRunWithTools(
 					stream
 				};
 				if (systemMessage) {
-					geminiInput.systemInstruction = {
+					geminiInput.system_instruction = {
 						parts: [{ text: systemMessage.content as string }]
 					};
 				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) with input:', JSON.stringify(geminiInput));
+				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.14 with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
