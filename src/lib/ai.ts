@@ -66,39 +66,10 @@ export async function customRunWithTools(
 				const otherMessages = msgs.filter((m) => m.role !== 'system');
 				const geminiInput: Record<string, unknown> = {
 					contents: otherMessages.map((m) => {
-						const parts: any[] = [];
-						let role = 'user';
-						
-						if (m.role === 'assistant') {
-							role = 'model';
-							if (m.content) parts.push({ text: m.content });
-							if (m.tool_calls) {
-								for (const call of m.tool_calls) {
-									try {
-										const args = typeof call.function.arguments === 'string' 
-											? JSON.parse(call.function.arguments) 
-											: call.function.arguments;
-										parts.push({ functionCall: { name: call.function.name, args } });
-									} catch (e) {
-										console.error('[customRunWithTools] Failed to parse Gemini tool call args:', call.function.arguments, e);
-									}
-								}
-							}
-						} else if (m.role === 'tool') {
-							role = 'function';
-							parts.push({
-								functionResponse: {
-									name: m.name,
-									response: { content: m.content }
-								}
-							});
-						} else {
-							role = 'user';
-							parts.push({ text: m.content });
-						}
-						return { role, parts };
+						let role = m.role === 'assistant' ? 'model' : 'user';
+						if (m.role === 'tool') role = 'user'; // Fallback for testing
+						return { role, parts: [{ text: m.content || '' }] };
 					}),
-					tools: cfTools.length > 0 ? [{ function_declarations: cfTools.map(t => t.function) }] : undefined,
 					stream
 				};
 				if (systemMessage) {
@@ -106,9 +77,9 @@ export async function customRunWithTools(
 						parts: [{ text: systemMessage.content as string }]
 					};
 				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) with input:', JSON.stringify(geminiInput));
+				console.log('[customRunWithTools] Calling ai.run (Gemini) simple with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
-				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
+				console.log('[customRunWithTools] ai.run (Gemini) simple call returned.');
 				return res;
 			}
 			
