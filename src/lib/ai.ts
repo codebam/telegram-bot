@@ -114,6 +114,7 @@ export async function customRunWithTools(
 	if (toolCalls.length === 0) {
 		const gemmaRegex = /<\|tool_call>\s*call:\s*([a-zA-Z0-9_]+)([\s\S]*?)<tool_call\|>/g;
 		const standardRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+		const markdownRegex = /```json\s*<tool_call>\s*([\s\S]*?)\s*<\/tool_call>\s*```/g;
 
 		let match;
 		while ((match = gemmaRegex.exec(responseText)) !== null) {
@@ -134,10 +135,11 @@ export async function customRunWithTools(
 			});
 		}
 
-		while ((match = standardRegex.exec(responseText)) !== null) {
-			const content = match[1].trim();
+		const processStandardMatch = (content: string) => {
 			try {
-				const parsed = JSON.parse(content.replace(/'/g, '"'));
+				// Clean up potential backticks and language identifiers
+				const cleaned = content.trim().replace(/^```json\s*/, '').replace(/\s*```$/, '');
+				const parsed = JSON.parse(cleaned.replace(/'/g, '"'));
 				const name = parsed.name || 'fetch';
 				const args = parsed.arguments || parsed;
 				toolCalls.push({
@@ -148,9 +150,18 @@ export async function customRunWithTools(
 			} catch (e) {
 				console.error('Failed to parse tool call:', content, e);
 			}
+		};
+
+		while ((match = markdownRegex.exec(responseText)) !== null) {
+			processStandardMatch(match[1]);
+		}
+
+		while ((match = standardRegex.exec(responseText)) !== null) {
+			processStandardMatch(match[1]);
 		}
 
 		responseText = responseText
+			.replace(/```json\s*<tool_call>[\s\S]*?<\/tool_call>\s*```/g, '')
 			.replace(/<\|tool_call>[\s\S]*?<tool_call\|>/g, '')
 			.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
 			.trim();
