@@ -1,6 +1,91 @@
 import { ParseMode } from '@grammyjs/types';
 import { markdownToHtml, type AiResponse, type Tool, type Task } from '@codebam/shared';
 
+const THINK_TAGS = ['think', 'thinking', 'reasoning', 'reflection', 'thought', 'analysis'];
+const THINK_OPEN_RE = new RegExp(`<(?:${THINK_TAGS.join('|')})(?:\\s[^>]*)?>`, 'i');
+const THINK_CLOSE_RE = new RegExp(`</(?:${THINK_TAGS.join('|')})>`, 'i');
+const THINK_BLOCK_RE = new RegExp(
+	`<(?:${THINK_TAGS.join('|')})(?:\\s[^>]*)?>[\\s\\S]*?</(?:${THINK_TAGS.join('|')})>`,
+	'gi'
+);
+const THINK_OPEN_ONLY_RE = new RegExp(`<(?:${THINK_TAGS.join('|')})(?:\\s[^>]*)?>[\\s\\S]*$`, 'i');
+
+/**
+ * Strip <think>/<reasoning>/etc. blocks from a complete string. Also drops
+ * an unterminated opening block (when the model never closes it) and trims
+ * leading whitespace left behind.
+ */
+export function stripThinking(text: string): string {
+	if (!text) return text;
+	let out = text.replace(THINK_BLOCK_RE, '');
+	out = out.replace(THINK_OPEN_ONLY_RE, '');
+	return out.replace(/^\s+/, '');
+}
+
+/**
+ * Stream-aware filter: feed chunks of generated text in order and receive
+ * the same text with think-tag content removed, tolerating tags split across
+ * chunks.
+ */
+export function createThinkFilter() {
+	let buffer = '';
+	let inside = false;
+	let emittedAny = false;
+	const flush = (chunk: string) => {
+		const out = emittedAny ? chunk : chunk.replace(/^\s+/, '');
+		if (out) emittedAny = true;
+		return out;
+	};
+	return {
+		push(chunk: string): string {
+			buffer += chunk;
+			let result = '';
+			while (buffer.length > 0) {
+				if (inside) {
+					const close = buffer.match(THINK_CLOSE_RE);
+					if (!close || close.index === undefined) return result;
+					buffer = buffer.slice(close.index + close[0].length);
+					inside = false;
+				} else {
+					const open = buffer.match(THINK_OPEN_RE);
+					if (open && open.index !== undefined) {
+						if (open.index > 0) result += flush(buffer.slice(0, open.index));
+						buffer = buffer.slice(open.index + open[0].length);
+						inside = true;
+						continue;
+					}
+					const firstLt = buffer.indexOf('<');
+					if (firstLt === -1) {
+						result += flush(buffer);
+						buffer = '';
+						return result;
+					}
+					if (firstLt > 0) {
+						result += flush(buffer.slice(0, firstLt));
+						buffer = buffer.slice(firstLt);
+					}
+					const gt = buffer.indexOf('>');
+					if (gt === -1) return result; // hold partial tag, wait for more
+					// Complete `<...>` that didn't match THINK_OPEN_RE — pass through.
+					result += flush(buffer.slice(0, gt + 1));
+					buffer = buffer.slice(gt + 1);
+				}
+			}
+			return result;
+		},
+		end(): string {
+			if (inside) {
+				buffer = '';
+				inside = false;
+				return '';
+			}
+			const tail = buffer;
+			buffer = '';
+			return flush(tail);
+		}
+	};
+}
+
 /**
  * Robustly extract text from various AI response formats.
  */
@@ -18,8 +103,6 @@ export function extractText(obj: string | AiResponse | any): string {
 	if (typeof response.text === 'string') return response.text;
 	if (typeof response.content === 'string') return response.content;
 	if (typeof response.delta === 'string') return response.delta;
-	if (typeof response.reasoning === 'string') return response.reasoning;
-	if (typeof response.reasoning_content === 'string') return response.reasoning_content;
 
 	if (response.choices && Array.isArray(response.choices) && response.choices.length > 0)
 		return extractText(response.choices[0]);
@@ -32,6 +115,7 @@ export function extractText(obj: string | AiResponse | any): string {
 	if (response.parts && Array.isArray(response.parts) && response.parts.length > 0) {
 		let text = '';
 		for (const part of response.parts) {
+			if (part.thought) continue; // Gemini thinking parts
 			if (part.text) text += part.text;
 		}
 		return text;
@@ -257,6 +341,7 @@ export async function sendMessageDraft(token: string, data: any) {
  */
 export async function* getAiStream(ai: any, model: string, messages: any[], tools: Tool[] = []) {
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
+	const filter = createThinkFilter();
 
 	if (response instanceof ReadableStream) {
 		const reader = response.getReader();
@@ -273,16 +358,21 @@ export async function* getAiStream(ai: any, model: string, messages: any[], tool
 					try {
 						const parsed = JSON.parse(data);
 						const text = extractText(parsed);
-						if (text) yield text;
+						if (text) {
+							const filtered = filter.push(text);
+							if (filtered) yield filtered;
+						}
 					} catch {
 						// Ignore malformed JSON chunks
 					}
 				}
 			}
 		}
+		const tail = filter.end();
+		if (tail) yield tail;
 	} else {
 		console.log('[getAiStream] aiResponse is not a stream, yielding extractText(aiResponse)');
-		yield extractText(response);
+		yield stripThinking(extractText(response));
 	}
 }
 
