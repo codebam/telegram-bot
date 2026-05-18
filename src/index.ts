@@ -652,34 +652,38 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 
 		if (prompt.includes('/start') && guestMessage.guest_query_id) {
-			await ctx.api.answerGuestQuery(guestMessage.guest_query_id, {
-				type: 'article',
-				id: crypto.randomUUID(),
-				title: 'Welcome',
-				input_message_content: {
-					message_text:
-						'Welcome! Here are my commands:\n' +
-						'/balance - Check your current Star balance\n' +
-						'/load <amount> - Top up your balance with Telegram Stars\n' +
-						'/photo <prompt> - Generate an image (100 Stars)\n' +
-						'/model <name> - Switch AI model and see costs\n' +
-						'/ttl <1-5> - Set the TTL for bot-to-bot responses\n' +
-						'/code <prompt> - Generate code snippets\n' +
-						'/prompt <"prompt"> - Set your custom system prompt (use "" or reset to clear)\n' +
-						'/facts <"facts"> - Set facts about yourself for business mode (use "" or reset to clear)\n' +
-						'/request <prompt> - Make arbitrary API requests (uses fetch tool)\n' +
-						'<prompt> - Generate text (may use tools if supported by model)\n' +
-						'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
-						'/clear - Clear your conversation history\n\n' +
-						'New users start with 200 free credits!\n\n' +
-						'Click the button below to open the Web App!',
-				},
-				reply_markup: {
-					inline_keyboard: [
-						[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }],
-					],
-				},
-			});
+			try {
+				await ctx.api.answerGuestQuery(guestMessage.guest_query_id, {
+					type: 'article',
+					id: crypto.randomUUID(),
+					title: 'Welcome',
+					input_message_content: {
+						message_text:
+							'Welcome! Here are my commands:\n' +
+							'/balance - Check your current Star balance\n' +
+							'/load <amount> - Top up your balance with Telegram Stars\n' +
+							'/photo <prompt> - Generate an image (100 Stars)\n' +
+							'/model <name> - Switch AI model and see costs\n' +
+							'/ttl <1-5> - Set the TTL for bot-to-bot responses\n' +
+							'/code <prompt> - Generate code snippets\n' +
+							'/prompt <"prompt"> - Set your custom system prompt (use "" or reset to clear)\n' +
+							'/facts <"facts"> - Set facts about yourself for business mode (use "" or reset to clear)\n' +
+							'/request <prompt> - Make arbitrary API requests (uses fetch tool)\n' +
+							'<prompt> - Generate text (may use tools if supported by model)\n' +
+							'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
+							'/clear - Clear your conversation history\n\n' +
+							'New users start with 200 free credits!\n\n' +
+							'Click the button below to open the Web App!',
+					},
+					reply_markup: {
+						inline_keyboard: [
+							[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }],
+						],
+					},
+				});
+			} catch (e) {
+				console.error('[guest_message] Failed to answer guest query:', e);
+			}
 			return;
 		}
 

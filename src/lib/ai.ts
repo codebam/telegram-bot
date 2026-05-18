@@ -340,15 +340,19 @@ export async function streamAiResponseToTelegram(
 				})
 				.catch((e: Error) => console.error('Error sending final reply:', e));
 		} else if (task.updateType === 'guest_message' && task.guestQueryId) {
-			await ctx.api.answerGuestQuery(task.guestQueryId, {
-				type: 'article',
-				id: crypto.randomUUID(),
-				title: 'AI Response',
-				input_message_content: {
-					message_text: await markdownToHtml(streamContent),
-					parse_mode: 'HTML',
-				},
-			});
+			try {
+				await ctx.api.answerGuestQuery(task.guestQueryId, {
+					type: 'article',
+					id: crypto.randomUUID(),
+					title: 'AI Response',
+					input_message_content: {
+						message_text: await markdownToHtml(streamContent),
+						parse_mode: 'HTML',
+					},
+				});
+			} catch (e) {
+				console.error('[streamAiResponseToTelegram] Failed to answer guest query:', e);
+			}
 		} else {
 			await ctx.reply(await markdownToHtml(streamContent), { parse_mode: 'HTML' });
 		}
