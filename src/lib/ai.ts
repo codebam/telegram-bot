@@ -62,52 +62,17 @@ export async function customRunWithTools(
 		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}`);
 		try {
 			if (isGemini) {
-				const systemMessage = msgs.find((m) => m.role === 'system');
 				const otherMessages = msgs.filter((m) => m.role !== 'system');
 				const geminiInput: Record<string, unknown> = {
 					contents: otherMessages.map((m) => {
 						let role = m.role === 'assistant' ? 'model' : 'user';
 						const parts: any[] = [];
-						
-						if (m.role === 'tool') {
-							role = 'model'; // Gemini often uses 'model' role for function response parts too, or 'function'
-							parts.push({
-								functionResponse: {
-									name: m.name,
-									response: { content: m.content }
-								}
-							});
-						} else {
-							if (m.content) parts.push({ text: m.content });
-							if (m.tool_calls) {
-								for (const call of m.tool_calls) {
-									try {
-										const args = typeof call.function.arguments === 'string' 
-											? JSON.parse(call.function.arguments) 
-											: call.function.arguments;
-										parts.push({
-											functionCall: {
-												name: call.function.name,
-												args
-											}
-										});
-									} catch (e) {
-										console.error('[customRunWithTools] Failed to parse Gemini tool call args:', call.function.arguments, e);
-									}
-								}
-							}
-						}
+						if (m.content) parts.push({ text: m.content });
 						return { role, parts };
 					}),
-					tools: cfTools.length > 0 ? [{ function_declarations: cfTools.map(t => t.function) }] : undefined,
 					stream
 				};
-				if (systemMessage) {
-					geminiInput.system_instruction = {
-						parts: [{ text: systemMessage.content as string }]
-					};
-				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.14 with input:', JSON.stringify(geminiInput));
+				console.log('[customRunWithTools] Calling ai.run (Gemini) DEBUG (no tools) with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
