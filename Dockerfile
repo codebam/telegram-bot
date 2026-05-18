@@ -1,7 +1,7 @@
 FROM alpine:latest
 
-# Install python and other common utilities
-RUN apk add --no-base --no-cache python3 py3-pip bash curl
+# Install python, nodejs, and other common utilities
+RUN apk add --no-cache python3 py3-pip nodejs npm bash curl
 
 # Set up a working directory
 WORKDIR /home/sandbox
