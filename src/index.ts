@@ -746,6 +746,16 @@ export default {
 		const bot = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN);
 		setupBot(bot, env, executionCtx);
 
+		if (request.method === 'POST') {
+			const clone = request.clone();
+			try {
+				const body = await clone.json();
+				console.log('[Fetch] Incoming Update:', JSON.stringify(body));
+			} catch (e) {
+				console.error('[Fetch] Error parsing update body:', e);
+			}
+		}
+
 		if (request.method === 'GET') {
 			const url = new URL(request.url);
 			if (url.searchParams.get('command') === 'set') {
