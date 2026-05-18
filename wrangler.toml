@@ -14,9 +14,10 @@ id = "7c147881ce7d42b8811bfbf8c38e3ee4"
 binding = "R2"
 bucket_name = "share"
 
-[[services]]
+[[workflows]]
 binding = "AI_WORKFLOW"
-service = "ai-workflow"
+name = "ai-workflow"
+class_name = "AIWorkflow"
 
 [env.dev]
 name = "tux-robot-dev"
@@ -32,6 +33,7 @@ id = "7c147881ce7d42b8811bfbf8c38e3ee4"
 binding = "R2"
 bucket_name = "share"
 
-[[env.dev.services]]
+[[env.dev.workflows]]
 binding = "AI_WORKFLOW"
-service = "ai-workflow-dev"
+name = "ai-workflow-dev"
+class_name = "AIWorkflow"

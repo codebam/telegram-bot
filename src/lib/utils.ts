@@ -186,3 +186,50 @@ export const wikipediaTool = {
 		return 'Error executing Wikipedia search: No results found.';
 	},
 };
+
+export const createTavilySearchTool = (apiKey: string) => ({
+	name: 'tavily_search',
+	description: 'Search the web for current information on any topic using Tavily. Returns snippets and source URLs.',
+	parameters: {
+		type: 'object',
+		properties: {
+			query: { type: 'string', description: 'The search query to search for' },
+		},
+		required: ['query'],
+	},
+	function: async (args: { query?: string; q?: string }) => {
+		const query = args.query || args.q || '';
+		try {
+			const res = await fetch(`https://mcp.tavily.com/mcp/?tavilyApiKey=${apiKey}`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					Accept: 'application/json, text/event-stream',
+				},
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 1,
+					method: 'tools/call',
+					params: {
+						name: 'tavily_search',
+						arguments: { query },
+					},
+				}),
+			});
+			const text = await res.text();
+			const dataLine = text.split('\n').find((l) => l.startsWith('data: '));
+			if (dataLine) {
+				const data = JSON.parse(dataLine.substring(6));
+				if (data.result && data.result.content && data.result.content.length > 0) {
+					return data.result.content[0].text;
+				}
+				if (data.error) {
+					return `Error executing Tavily search: ${data.error.message}`;
+				}
+			}
+			return `Error executing Tavily search: Unexpected response format.`;
+		} catch (e) {
+			return `Error executing Tavily search: ${String(e)}`;
+		}
+	},
+});
