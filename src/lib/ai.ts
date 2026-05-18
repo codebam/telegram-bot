@@ -41,6 +41,7 @@ export async function customRunWithTools(
 	input: { messages: any[]; tools?: Tool[] },
 	config: { streamFinalResponse: boolean }
 ): Promise<AiResponse | ReadableStream> {
+	console.log(`[customRunWithTools] Model: ${model}, Tools: ${input.tools?.length || 0}, Stream: ${config.streamFinalResponse}`);
 	const messages = [...input.messages];
 	const tools = input.tools || [];
 	const isGemini = model.includes('google/gemini');
@@ -72,6 +73,7 @@ export async function customRunWithTools(
 	}
 
 	const runModel = async (msgs: any[], stream: boolean) => {
+		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}`);
 		if (isGemini) {
 			const systemMessage = msgs.find((m) => m.role === 'system');
 			const otherMessages = msgs.filter((m) => m.role !== 'system');
@@ -97,10 +99,13 @@ export async function customRunWithTools(
 	};
 
 	if (cfTools.length === 0) {
+		console.log('[customRunWithTools] No tools, running model directly...');
 		return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
 	}
 
+	console.log('[customRunWithTools] Tools detected, running initial model call for tool detection...');
 	const response = (await runModel(messages, false)) as AiResponse;
+	console.log('[customRunWithTools] Initial model call finished.');
 
 	let toolCalls: any[] = [];
 	if (response?.tool_calls) {
@@ -168,6 +173,7 @@ export async function customRunWithTools(
 	}
 
 	if (toolCalls.length > 0) {
+		console.log(`[customRunWithTools] Found ${toolCalls.length} tool calls.`);
 		const normalizedToolCalls = toolCalls.map((call: any, index: number) => {
 			const name = call.name || (call.function && call.function.name);
 			let args = call.arguments || (call.function && call.function.arguments);
@@ -198,6 +204,7 @@ export async function customRunWithTools(
 			const tool = tools.find((t: Tool) => t.name === toolName);
 
 			if (tool && tool.function) {
+				console.log(`[customRunWithTools] Executing tool: ${toolName}`);
 				try {
 					let parsedArgs;
 					try {
@@ -208,6 +215,7 @@ export async function customRunWithTools(
 					const result = await tool.function(parsedArgs);
 					messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: String(result) });
 				} catch (e) {
+					console.error(`[customRunWithTools] Tool execution failed: ${toolName}`, e);
 					messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: String(e) });
 				}
 			} else {
@@ -215,10 +223,13 @@ export async function customRunWithTools(
 			}
 		}
 
+		console.log('[customRunWithTools] Running model after tool execution...');
 		return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
 	}
 
+	console.log('[customRunWithTools] No tool calls found in initial response.');
 	if (config.streamFinalResponse) {
+		console.log('[customRunWithTools] Re-running model for streaming response...');
 		return (await runModel(messages, true)) as AiResponse | ReadableStream;
 	}
 
@@ -246,6 +257,7 @@ export async function* getAiStream(
 	messages: any[],
 	tools: Tool[] = []
 ): AsyncGenerator<string> {
+	console.log(`[getAiStream] Starting for model: ${modelId}`);
 	const aiResponse = await customRunWithTools(
 		ai,
 		modelId,
@@ -257,6 +269,7 @@ export async function* getAiStream(
 	);
 
 	if (typeof aiResponse === 'object' && aiResponse !== null && 'getReader' in aiResponse) {
+		console.log('[getAiStream] aiResponse is a ReadableStream');
 		const stream = aiResponse as ReadableStream;
 		const reader = stream.getReader();
 		const decoder = new TextDecoder();
@@ -264,6 +277,7 @@ export async function* getAiStream(
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) {
+				console.log('[getAiStream] reader.read() done: true');
 				break;
 			}
 
@@ -274,6 +288,7 @@ export async function* getAiStream(
 				if (line.startsWith('data: ')) {
 					const data = line.slice(6);
 					if (data === '[DONE]') {
+						console.log('[getAiStream] data: [DONE] received');
 						break;
 					}
 					try {
@@ -287,6 +302,7 @@ export async function* getAiStream(
 			}
 		}
 	} else {
+		console.log('[getAiStream] aiResponse is not a stream, yielding extractText(aiResponse)');
 		yield extractText(aiResponse);
 	}
 }
