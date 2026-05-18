@@ -415,11 +415,15 @@ export async function streamAiResponseToTelegram(
 					console.error('[streamAiResponseToTelegram] Failed to answer guest query:', e);
 				}
 			} else {
-				await ctx.reply(await markdownToHtml(streamContent), {
-					parse_mode: 'HTML',
-					business_connection_id: task.businessConnectionId,
-					reply_to_message_id: task.messageId,
-				});
+				try {
+					await ctx.reply(await markdownToHtml(streamContent), {
+						parse_mode: 'HTML',
+						business_connection_id: task.businessConnectionId,
+						reply_to_message_id: task.messageId,
+					});
+				} catch (e) {
+					console.error('[streamAiResponseToTelegram] Failed to send final business reply:', e);
+				}
 			}
 		}
 	}

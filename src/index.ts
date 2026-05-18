@@ -28,7 +28,7 @@ async function getBusinessOwnerData(
 		`business_connection:${connectionId}`,
 		'json'
 	);
-	if (ownerData && ownerData.username !== undefined) {
+	if (ownerData) {
 		console.log(`[getBusinessOwnerData] Cache HIT for connection ${connectionId}:`, JSON.stringify(ownerData));
 	} else {
 		console.log(`[getBusinessOwnerData] Cache MISS or stale entry for connection ${connectionId}. Fetching from Telegram API...`);
