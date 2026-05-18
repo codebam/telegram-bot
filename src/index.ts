@@ -275,6 +275,12 @@ async function chatConversation(conversation: MyConversation, ctx: MyContext) {
 }
 
 function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionContext) {
+	bot.use(async (ctx, next) => {
+		ctx.env = env;
+		ctx.executionCtx = executionCtx;
+		await next();
+	});
+
 	bot.api.config.use(autoRetry());
 	bot.use(stream());
 
@@ -472,12 +478,6 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	bot.use(commands);
-
-	bot.use(async (ctx, next) => {
-		ctx.env = env;
-		ctx.executionCtx = executionCtx;
-		await next();
-	});
 
 	bot.on('message:document', async (ctx) => {
 		const fileId = ctx.message.document.file_id;
