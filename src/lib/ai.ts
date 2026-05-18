@@ -64,6 +64,7 @@ export async function customRunWithTools(
 		const response = await cfRunWithTools(ai, model, {
 			messages: input.messages,
 			tools: tools as any,
+		}, {
 			streamFinalResponse: config.streamFinalResponse,
 			maxRecursiveToolRuns: 5
 		});
