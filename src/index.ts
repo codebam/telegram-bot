@@ -131,7 +131,9 @@ async function chargeStars(
 
 	if (balance >= amount) {
 		try {
-			await ctx.replyWithChatAction('typing');
+			await ctx.replyWithChatAction('typing', {
+				business_connection_id: ctx.update.business_message?.business_connection_id,
+			});
 		} catch (e) {
 			console.log('[chargeStars] Failed to send chat action (likely not a member):', e);
 		}
@@ -174,7 +176,11 @@ async function chargeStars(
 	} else {
 		if (ctx.update.business_message || ctx.update.guest_message) {
 			await ctx.reply(
-				'Insufficient balance. Please go to direct messages and use /load to top up your Stars.'
+				'Insufficient balance. Please go to direct messages and use /load to top up your Stars.',
+				{
+					business_connection_id: ctx.update.business_message?.business_connection_id,
+					reply_to_message_id: ctx.update.business_message?.message_id,
+				}
 			);
 		} else {
 			const taskId = crypto.randomUUID();
@@ -247,7 +253,13 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 				const amount = modelConfig.cost;
 
 				if (balance >= amount) {
-					await ctx.replyWithChatAction('typing');
+					try {
+						await ctx.replyWithChatAction('typing', {
+							business_connection_id: ctx.update.business_message?.business_connection_id,
+						});
+					} catch (e) {
+						console.error('[chatConversation] Failed to send chat action:', e);
+					}
 					const balanceKey = `balance:${String(billingUserId)}`;
 					await conversation.external(() => env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance - amount)));
 
