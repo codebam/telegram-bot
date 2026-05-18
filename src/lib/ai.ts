@@ -65,10 +65,32 @@ export async function customRunWithTools(
 				const systemMessage = msgs.find((m) => m.role === 'system');
 				const otherMessages = msgs.filter((m) => m.role !== 'system');
 				const geminiInput: Record<string, unknown> = {
-					contents: otherMessages.map((m) => ({
-						role: m.role === 'assistant' ? 'model' : 'user',
-						parts: [{ text: m.content as string }]
-					})),
+					contents: otherMessages.map((m) => {
+						const role = m.role === 'assistant' ? 'model' : 'user';
+						const parts: any[] = [];
+						if (m.content) {
+							parts.push({ text: m.content });
+						}
+						if (m.tool_calls) {
+							for (const call of m.tool_calls) {
+								parts.push({
+									functionCall: {
+										name: call.function.name,
+										args: JSON.parse(call.function.arguments)
+									}
+								});
+							}
+						}
+						if (m.role === 'tool') {
+							parts.push({
+								functionResponse: {
+									name: m.name,
+									response: { content: m.content }
+								}
+							});
+						}
+						return { role, parts };
+					}),
 					tools: cfTools.length > 0 ? [{ function_declarations: cfTools.map(t => t.function) }] : undefined,
 					stream
 				};
@@ -119,6 +141,22 @@ export async function customRunWithTools(
 			toolCalls = [...aiRes.tool_calls];
 		} else if (aiRes?.choices?.[0]?.message?.tool_calls) {
 			toolCalls = [...aiRes.choices[0].message.tool_calls];
+		} else if (aiRes?.candidates?.[0]?.content?.parts) {
+			// Extract Gemini function calls
+			for (const part of aiRes.candidates[0].content.parts as any[]) {
+				if (part.functionCall) {
+					toolCalls.push({
+						id: `call_${Math.random().toString(36).substring(2, 9)}`,
+						type: 'function',
+						function: {
+							name: part.functionCall.name,
+							arguments: typeof part.functionCall.args === 'string' 
+								? part.functionCall.args 
+								: JSON.stringify(part.functionCall.args)
+						}
+					});
+				}
+			}
 		}
 
 		let responseText = aiRes?.response || aiRes?.choices?.[0]?.message?.content || '';
