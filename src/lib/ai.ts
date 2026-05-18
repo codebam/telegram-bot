@@ -68,10 +68,38 @@ export async function customRunWithTools(
 					contents: otherMessages.map((m) => {
 						let role = m.role === 'assistant' ? 'model' : 'user';
 						const parts: any[] = [];
-						if (m.content) parts.push({ text: m.content });
+						
+						if (m.role === 'tool') {
+							role = 'function'; // Try 'function' first as it was in my previous structured attempt
+							parts.push({
+								functionResponse: {
+									name: m.name,
+									response: { content: m.content }
+								}
+							});
+						} else {
+							if (m.content) parts.push({ text: m.content });
+							if (m.tool_calls) {
+								for (const call of m.tool_calls) {
+									try {
+										const args = typeof call.function.arguments === 'string' 
+											? JSON.parse(call.function.arguments) 
+											: call.function.arguments;
+										parts.push({
+											functionCall: {
+												name: call.function.name,
+												args
+											}
+										});
+									} catch (e) {
+										console.error('[customRunWithTools] Failed to parse Gemini tool call args:', call.function.arguments, e);
+									}
+								}
+							}
+						}
 						return { role, parts };
 					}),
-					tools: cfTools.length > 0 ? [{ function_declarations: cfTools.map(t => t.function) }] : undefined,
+					tools: cfTools.length > 0 ? cfTools : undefined,
 					stream
 				};
 				if (systemMessage) {
@@ -79,7 +107,7 @@ export async function customRunWithTools(
 						parts: [{ text: systemMessage.content as string }]
 					};
 				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) DEBUG (tools) with input:', JSON.stringify(geminiInput));
+				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.18 (standard tools) with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
