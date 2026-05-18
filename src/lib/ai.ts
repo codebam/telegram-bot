@@ -103,13 +103,10 @@ export async function customRunWithTools(
 			const options: any = {
 				messages: msgs,
 				tools: cfTools.length > 0 ? cfTools : undefined,
-				stream
+				stream,
+				parallel_tool_calls: false,
+				tool_choice: 'auto'
 			};
-
-			if (model.includes('gemma-4')) {
-				options.parallel_tool_calls = false;
-				options.tool_choice = 'auto';
-			}
 
 			const res = await ai.run(model, options);
 			console.log('[customRunWithTools] ai.run (Workers AI) call returned.');
@@ -120,142 +117,152 @@ export async function customRunWithTools(
 		}
 	};
 
-	if (cfTools.length === 0) {
-		console.log('[customRunWithTools] No tools, running model directly...');
-		return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
-	}
-
-	console.log('[customRunWithTools] Tools detected, running initial model call for tool detection...');
-	const response = (await runModel(messages, false)) as AiResponse;
-	console.log('[customRunWithTools] Initial model call finished.');
-
-	let toolCalls: any[] = [];
-	if (response?.tool_calls) {
-		toolCalls = [...response.tool_calls];
-	} else if (response?.choices?.[0]?.message?.tool_calls) {
-		toolCalls = [...response.choices[0].message.tool_calls];
-	}
-
-	let responseText = response?.response || response?.choices?.[0]?.message?.content || '';
-
-	if (toolCalls.length === 0) {
-		const gemmaRegex = /<\|tool_call>\s*call:\s*([a-zA-Z0-9_]+)([\s\S]*?)<tool_call\|>/g;
-		const standardRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
-		const markdownRegex = /```json\s*<tool_call>\s*([\s\S]*?)\s*<\/tool_call>\s*```/g;
-
-		let match;
-		while ((match = gemmaRegex.exec(responseText)) !== null) {
-			let name = match[1].trim();
-			if (name === 'http_fetch' || name === 'api_fetch') {
-				name = 'fetch';
-			}
-
-			let argsString = match[2].trim();
-			argsString = argsString
-				.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
-				.replace(/:\s*'([^']*)'/g, ': "$1"');
-
-			toolCalls.push({
-				id: `call_${Math.random().toString(36).substring(2, 9)}`,
-				type: 'function',
-				function: { name, arguments: argsString }
-			});
+	let turn = 0;
+	while (turn < 5) {
+		console.log(`[customRunWithTools] Starting turn ${turn + 1}...`);
+		
+		// If this is the last turn or no tools, and we want streaming, then stream.
+		// For tool detection, we MUST NOT stream.
+		const shouldStream = turn === 4 || cfTools.length === 0 ? config.streamFinalResponse : false;
+		
+		const response = await runModel(messages, shouldStream);
+		
+		if (shouldStream) {
+			console.log('[customRunWithTools] Returning streaming response.');
+			return response;
 		}
 
-		const processStandardMatch = (content: string) => {
-			try {
-				// Clean up potential backticks and language identifiers
-				const cleaned = content.trim().replace(/^```json\s*/, '').replace(/\s*```$/, '');
-				const parsed = JSON.parse(cleaned.replace(/'/g, '"'));
-				const name = parsed.name || 'fetch';
-				const args = parsed.arguments || parsed;
+		const aiRes = response as AiResponse;
+		let toolCalls: any[] = [];
+		if (aiRes?.tool_calls) {
+			toolCalls = [...aiRes.tool_calls];
+		} else if (aiRes?.choices?.[0]?.message?.tool_calls) {
+			toolCalls = [...aiRes.choices[0].message.tool_calls];
+		}
+
+		let responseText = aiRes?.response || aiRes?.choices?.[0]?.message?.content || '';
+
+		if (toolCalls.length === 0) {
+			const gemmaRegex = /<\|tool_call>\s*call:\s*([a-zA-Z0-9_]+)([\s\S]*?)<tool_call\|>/g;
+			const standardRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+			const markdownRegex = /```json\s*<tool_call>\s*([\s\S]*?)\s*<\/tool_call>\s*```/g;
+
+			let match;
+			while ((match = gemmaRegex.exec(responseText)) !== null) {
+				let name = match[1].trim();
+				if (name === 'http_fetch' || name === 'api_fetch') {
+					name = 'fetch';
+				}
+
+				let argsString = match[2].trim();
+				argsString = argsString
+					.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
+					.replace(/:\s*'([^']*)'/g, ': "$1"');
+
 				toolCalls.push({
 					id: `call_${Math.random().toString(36).substring(2, 9)}`,
 					type: 'function',
-					function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) }
+					function: { name, arguments: argsString }
 				});
-			} catch (e) {
-				console.error('Failed to parse tool call:', content, e);
 			}
-		};
 
-		while ((match = markdownRegex.exec(responseText)) !== null) {
-			processStandardMatch(match[1]);
-		}
-
-		while ((match = standardRegex.exec(responseText)) !== null) {
-			processStandardMatch(match[1]);
-		}
-
-		responseText = responseText
-			.replace(/```json\s*<tool_call>[\s\S]*?<\/tool_call>\s*```/g, '')
-			.replace(/<\|tool_call>[\s\S]*?<tool_call\|>/g, '')
-			.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
-			.trim();
-	}
-
-	if (toolCalls.length > 0) {
-		console.log(`[customRunWithTools] Found ${toolCalls.length} tool calls.`);
-		const normalizedToolCalls = toolCalls.map((call: any, index: number) => {
-			const name = call.name || (call.function && call.function.name);
-			let args = call.arguments || (call.function && call.function.arguments);
-			if (typeof args !== 'string') {
+			const processStandardMatch = (content: string) => {
 				try {
-					args = JSON.stringify(args);
-				} catch {
-					args = '{}';
-				}
-			}
-			return {
-				id: call.id || `call_${Math.random().toString(36).substring(2, 9)}_${index}`,
-				type: 'function',
-				function: { name, arguments: args }
-			};
-		});
-
-		messages.push({
-			role: 'assistant',
-			content: responseText,
-			tool_calls: normalizedToolCalls
-		});
-
-		for (const call of normalizedToolCalls) {
-			const toolName = call.function.name;
-			const toolId = call.id;
-			const toolArgsString = call.function.arguments;
-			const tool = tools.find((t: Tool) => t.name === toolName);
-
-			if (tool && tool.function) {
-				console.log(`[customRunWithTools] Executing tool: ${toolName}`);
-				try {
-					let parsedArgs;
-					try {
-						parsedArgs = JSON.parse(toolArgsString);
-					} catch {
-						parsedArgs = toolArgsString;
-					}
-					const result = await tool.function(parsedArgs);
-					messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: String(result) });
+					// Clean up potential backticks and language identifiers
+					const cleaned = content.trim().replace(/^```json\s*/, '').replace(/\s*```$/, '');
+					const parsed = JSON.parse(cleaned.replace(/'/g, '"'));
+					const name = parsed.name || 'fetch';
+					const args = parsed.arguments || parsed;
+					toolCalls.push({
+						id: `call_${Math.random().toString(36).substring(2, 9)}`,
+						type: 'function',
+						function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) }
+					});
 				} catch (e) {
-					console.error(`[customRunWithTools] Tool execution failed: ${toolName}`, e);
-					messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: String(e) });
+					console.error('Failed to parse tool call:', content, e);
 				}
-			} else {
-				messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: 'Tool not found' });
+			};
+
+			while ((match = markdownRegex.exec(responseText)) !== null) {
+				processStandardMatch(match[1]);
 			}
+
+			while ((match = standardRegex.exec(responseText)) !== null) {
+				processStandardMatch(match[1]);
+			}
+
+			responseText = responseText
+				.replace(/```json\s*<tool_call>[\s\S]*?<\/tool_call>\s*```/g, '')
+				.replace(/<\|tool_call>[\s\S]*?<tool_call\|>/g, '')
+				.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+				.trim();
 		}
 
-		console.log('[customRunWithTools] Running model after tool execution...');
-		return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
+		if (toolCalls.length > 0) {
+			console.log(`[customRunWithTools] Found ${toolCalls.length} tool calls.`);
+			const normalizedToolCalls = toolCalls.map((call: any, index: number) => {
+				const name = call.name || (call.function && call.function.name);
+				let args = call.arguments || (call.function && call.function.arguments);
+				if (typeof args !== 'string') {
+					try {
+						args = JSON.stringify(args);
+					} catch {
+						args = '{}';
+					}
+				}
+				return {
+					id: call.id || `call_${Math.random().toString(36).substring(2, 9)}_${index}`,
+					type: 'function',
+					function: { name, arguments: args }
+				};
+			});
+
+			messages.push({
+				role: 'assistant',
+				content: responseText,
+				tool_calls: normalizedToolCalls
+			});
+
+			for (const call of normalizedToolCalls) {
+				const toolName = call.function.name;
+				const toolId = call.id;
+				const toolArgsString = call.function.arguments;
+				const tool = tools.find((t: Tool) => t.name === toolName);
+
+				if (tool && tool.function) {
+					console.log(`[customRunWithTools] Executing tool: ${toolName}`);
+					try {
+						let parsedArgs;
+						try {
+							parsedArgs = JSON.parse(toolArgsString);
+						} catch {
+							parsedArgs = toolArgsString;
+						}
+						const result = await tool.function(parsedArgs);
+						console.log(`[customRunWithTools] Tool ${toolName} execution successful.`);
+						messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: String(result) });
+					} catch (e) {
+						console.error(`[customRunWithTools] Tool execution failed: ${toolName}`, e);
+						messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: String(e) });
+					}
+				} else {
+					messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: 'Tool not found' });
+				}
+			}
+			// Continue to next turn
+		} else {
+			console.log('[customRunWithTools] No more tool calls. Finishing...');
+			if (config.streamFinalResponse) {
+				console.log('[customRunWithTools] Re-running final model call for streaming...');
+				return await runModel(messages, true);
+			}
+			return aiRes;
+		}
+		turn++;
 	}
 
-	console.log('[customRunWithTools] No tool calls found in initial response.');
-	if (config.streamFinalResponse) {
-		console.log('[customRunWithTools] Re-running model for streaming response...');
-		return (await runModel(messages, true)) as AiResponse | ReadableStream;
-	}
-
-	return response;
+	console.log('[customRunWithTools] Maximum turns reached.');
+	return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
 }
 
 export async function sendMessageDraft(token: string, data: any) {
