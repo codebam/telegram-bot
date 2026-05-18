@@ -184,7 +184,11 @@ async function chargeStars(
 	const amount = amountOverride ?? modelConfig.cost;
 
 	if (balance >= amount) {
-		await ctx.replyWithChatAction('typing');
+		try {
+			await ctx.replyWithChatAction('typing');
+		} catch (e) {
+			console.log('[chargeStars] Failed to send chat action (likely not a member):', e);
+		}
 		await ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance - amount));
 		task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
 
