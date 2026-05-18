@@ -636,7 +636,11 @@ export default {
 				];
 				const modelId = task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8';
 
-				const botInstance = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN);
+				const token = env.SECRET_TELEGRAM_API_TOKEN;
+				if (!token) {
+					throw new Error('SECRET_TELEGRAM_API_TOKEN is empty in queue handler');
+				}
+				const botInstance = new Bot<MyContext>(token);
 
 				const responseContent = await streamAiResponseToTelegram(
 					{
@@ -711,7 +715,12 @@ export default {
 			});
 		}
 
-		const bot = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN);
+		const token = env.SECRET_TELEGRAM_API_TOKEN;
+		if (!token) {
+			console.error('[Fetch] SECRET_TELEGRAM_API_TOKEN is empty or undefined!');
+			return new Response('Error: SECRET_TELEGRAM_API_TOKEN is missing', { status: 500 });
+		}
+		const bot = new Bot<MyContext>(token);
 		setupBot(bot, env, executionCtx);
 
 		if (request.method === 'POST') {
