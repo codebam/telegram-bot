@@ -99,24 +99,13 @@ export async function customRunWithTools(
 						}
 						return { role, parts };
 					}),
-					// Try with only one simple tool to isolate 1101
+					// Cloudflare Gemini expects functionDeclarations (camelCase) inside an object in 'tools'
 					tools: cfTools.length > 0 ? [{
-						function_declarations: cfTools.filter(t => t.function.name === 'wikipedia').map(t => {
-							const params = JSON.parse(JSON.stringify(t.function.parameters));
-							params.type = 'OBJECT';
-							if (params.properties) {
-								for (const key of Object.keys(params.properties)) {
-									if (params.properties[key].type) {
-										params.properties[key].type = params.properties[key].type.toUpperCase();
-									}
-								}
-							}
-							return {
-								name: t.function.name,
-								description: t.function.description,
-								parameters: params
-							};
-						})
+						functionDeclarations: cfTools.map(t => ({
+							name: t.function.name,
+							description: t.function.description,
+							parameters: t.function.parameters
+						}))
 					}] : undefined,
 					stream
 				};
@@ -125,7 +114,7 @@ export async function customRunWithTools(
 						parts: [{ text: systemMessage.content as string }]
 					};
 				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.22 (wiki only) with input:', JSON.stringify(geminiInput));
+				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.23 (camelCase tools) with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
