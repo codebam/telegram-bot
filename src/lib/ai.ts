@@ -1,6 +1,5 @@
 import { ParseMode } from '@grammyjs/types';
 import { markdownToHtml, type AiResponse, type Tool, type Task } from '@codebam/shared';
-import { runWithTools as cfRunWithTools } from '@cloudflare/ai-utils';
 
 /**
  * Robustly extract text from various AI response formats.
@@ -31,9 +30,11 @@ export function extractText(obj: string | AiResponse | any): string {
 		return extractText(response.candidates[0]);
 	if (response.content) return extractText(response.content);
 	if (response.parts && Array.isArray(response.parts) && response.parts.length > 0) {
+		let text = '';
 		for (const part of response.parts) {
-			if (part.text) return part.text;
+			if (part.text) text += part.text;
 		}
+		return text;
 	}
 
 	return '';
@@ -49,39 +50,206 @@ export async function customRunWithTools(
 	config: { streamFinalResponse: boolean }
 ): Promise<AiResponse | ReadableStream> {
 	console.log(`[customRunWithTools] Model: ${model}, Tools: ${input.tools?.length || 0}, Stream: ${config.streamFinalResponse}`);
+	const messages = [...input.messages];
+	const tools = input.tools || [];
+	const isGemini = model.includes('google/gemini');
 
-	// Map our tools to the format expected by ai-utils
-	const tools = (input.tools || []).map((t: Tool) => ({
+	const cfTools = tools.map((t: Tool) => ({
 		name: t.name,
 		description: t.description,
-		parameters: t.parameters as any,
-		run: t.function
+		parameters: t.parameters
 	}));
 
-	try {
-		// Use the official Cloudflare utility which handles multi-turn and platform specific logic
-		// This handles Gemini's thoughtSignature and role mapping automatically
-		const response = await cfRunWithTools(ai, model, {
-			messages: input.messages,
-			tools: tools as any,
-		}, {
-			streamFinalResponse: config.streamFinalResponse,
-			maxRecursiveToolRuns: 5
-		});
+	const runModel = async (msgs: any[], stream: boolean) => {
+		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}`);
+		try {
+			if (isGemini) {
+				const systemMessage = msgs.find((m) => m.role === 'system');
+				const otherMessages = msgs.filter((m) => m.role !== 'system');
+				const geminiInput: Record<string, unknown> = {
+					contents: otherMessages.map((m) => {
+						// For Gemini, we must preserve the exact parts array from previous turns
+						if (m.geminiParts) {
+							return {
+								role: m.role === 'assistant' ? 'model' : 'user',
+								parts: m.geminiParts
+							};
+						}
+						
+						let role = m.role === 'assistant' ? 'model' : 'user';
+						const parts: any[] = [];
+						if (m.content) parts.push({ text: m.content });
+						return { role, parts };
+					}),
+					tools: cfTools.length > 0 ? [{
+						functionDeclarations: cfTools
+					}] : undefined,
+					stream
+				};
+				if (systemMessage) {
+					geminiInput.system_instruction = {
+						parts: [{ text: systemMessage.content as string }]
+					};
+				}
+				console.log('[customRunWithTools] Calling ai.run (Gemini) with input:', JSON.stringify(geminiInput));
+				const res = await ai.run(model, geminiInput);
+				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
+				return res;
+			}
+			
+			const options: any = {
+				messages: msgs,
+				tools: cfTools.length > 0 ? cfTools.map(t => ({ type: 'function', function: t })) : undefined,
+				stream,
+				parallel_tool_calls: false,
+				tool_choice: 'auto'
+			};
 
-		// If it's a stream, return it directly
-		if (response instanceof ReadableStream) {
-			console.log('[customRunWithTools] Returning streaming response from ai-utils.');
+			console.log(`[customRunWithTools] Calling ai.run (Workers AI) with ${msgs.length} messages and ${cfTools.length} tools...`);
+			const res = await ai.run(model, options);
+			console.log('[customRunWithTools] ai.run (Workers AI) call returned.');
+			return res;
+		} catch (e) {
+			console.error(`[customRunWithTools] ai.run failed for model ${model}:`, e);
+			throw e;
+		}
+	};
+
+	let turn = 0;
+	while (turn < 5) {
+		console.log(`[customRunWithTools] Starting turn ${turn + 1}...`);
+		
+		const shouldStream = turn === 4 || cfTools.length === 0 ? config.streamFinalResponse : false;
+		const response = await runModel(messages, shouldStream);
+		
+		if (shouldStream || response instanceof ReadableStream) {
+			console.log('[customRunWithTools] Returning streaming response.');
 			return response;
 		}
 
-		// Otherwise, wrap it in our AiResponse interface
-		console.log('[customRunWithTools] Returning direct response from ai-utils.');
-		return response as unknown as AiResponse;
-	} catch (e: any) {
-		console.error(`[customRunWithTools] ai-utils failed for model ${model}:`, e);
-		throw e;
+		const aiRes = response as AiResponse;
+		let toolCalls: any[] = [];
+		let geminiParts: any[] = [];
+
+		if (aiRes?.tool_calls) {
+			toolCalls = [...aiRes.tool_calls];
+		} else if (aiRes?.choices?.[0]?.message?.tool_calls) {
+			toolCalls = [...aiRes.choices[0].message.tool_calls];
+		} else if (isGemini && aiRes?.candidates?.[0]?.content?.parts) {
+			geminiParts = aiRes.candidates[0].content.parts;
+			// Extract Gemini function calls
+			for (const part of geminiParts as any[]) {
+				if (part.functionCall) {
+					toolCalls.push({
+						id: `call_${Math.random().toString(36).substring(2, 9)}`,
+						type: 'function',
+						function: {
+							name: part.functionCall.name,
+							arguments: part.functionCall.args
+						}
+					});
+				}
+			}
+		}
+
+		let responseText = extractText(aiRes);
+
+		if (toolCalls.length > 0) {
+			console.log(`[customRunWithTools] Found ${toolCalls.length} tool calls.`);
+			const normalizedToolCalls = toolCalls.map((call: any, index: number) => {
+				const name = call.name || (call.function && call.function.name);
+				let args = call.arguments || (call.function && call.function.arguments);
+				if (typeof args !== 'string') {
+					try {
+						args = JSON.stringify(args);
+					} catch {
+						args = '{}';
+					}
+				}
+				return {
+					id: call.id || `call_${Math.random().toString(36).substring(2, 9)}_${index}`,
+					type: 'function',
+					function: { name, arguments: args }
+				};
+			});
+
+			messages.push({
+				role: 'assistant',
+				content: responseText,
+				tool_calls: normalizedToolCalls,
+				geminiParts: isGemini ? geminiParts : undefined
+			});
+
+			for (const call of normalizedToolCalls) {
+				const toolName = call.function.name;
+				const toolId = call.id;
+				const toolArgsString = call.function.arguments;
+				const tool = tools.find((t: Tool) => t.name === toolName);
+
+				if (tool && tool.function) {
+					console.log(`[customRunWithTools] Executing tool: ${toolName}`);
+					try {
+						let parsedArgs;
+						try {
+							parsedArgs = JSON.parse(toolArgsString);
+						} catch {
+							parsedArgs = toolArgsString;
+						}
+						const result = await tool.function(parsedArgs);
+						console.log(`[customRunWithTools] Tool ${toolName} execution successful.`);
+						const content = typeof result === 'string' ? result : JSON.stringify(result);
+						
+						const toolMessage: any = { role: 'tool', tool_call_id: toolId, name: toolName, content };
+						if (isGemini) {
+							toolMessage.geminiParts = [{
+								functionResponse: {
+									name: toolName,
+									response: { content }
+								}
+							}];
+						}
+						messages.push(toolMessage);
+					} catch (e) {
+						console.error(`[customRunWithTools] Tool execution failed: ${toolName}`, e);
+						const content = `Error: ${String(e)}`;
+						const toolMessage: any = { role: 'tool', tool_call_id: toolId, name: toolName, content };
+						if (isGemini) {
+							toolMessage.geminiParts = [{
+								functionResponse: {
+									name: toolName,
+									response: { content }
+								}
+							}];
+						}
+						messages.push(toolMessage);
+					}
+				} else {
+					const content = 'Tool not found';
+					const toolMessage: any = { role: 'tool', tool_call_id: toolId, name: toolName, content };
+					if (isGemini) {
+						toolMessage.geminiParts = [{
+							functionResponse: {
+								name: toolName,
+								response: { content }
+							}
+						}];
+					}
+					messages.push(toolMessage);
+				}
+			}
+		} else {
+			console.log('[customRunWithTools] No more tool calls. Finishing...');
+			if (config.streamFinalResponse) {
+				console.log('[customRunWithTools] Re-running final model call for streaming...');
+				return await runModel(messages, true);
+			}
+			return aiRes;
+		}
+		turn++;
 	}
+
+	console.log('[customRunWithTools] Maximum turns reached.');
+	return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
 }
 
 export async function sendMessageDraft(token: string, data: any) {
