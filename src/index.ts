@@ -179,103 +179,109 @@ async function chargeStars(
 	}
 }
 
-async function chatConversation(conversation: MyConversation, ctx: MyContext) {
-	let userId: number | string = ctx.from!.id;
-	const threadId = ctx.message?.message_thread_id;
+export function createChatConversation(env: Environment, executionCtx: ExecutionContext) {
+	return async function chatConversation(conversation: MyConversation, ctx: MyContext) {
+		ctx.env = env;
+		ctx.executionCtx = executionCtx;
+		let userId: number | string = ctx.from!.id;
+		const threadId = ctx.message?.message_thread_id;
 
-	if (ctx.update.business_message) {
-		const connectionId = ctx.update.business_message?.business_connection_id;
-		const customerId = ctx.update.business_message?.chat.id;
-		if (connectionId && customerId) {
-			userId = `business:${connectionId}:${customerId}`;
-		}
-	}
-
-	// Initialize history from KV if it exists, otherwise start fresh
-	const history = (await conversation.external(async () => {
-		const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
-		return await historyManager.getHistory(userId, threadId);
-	})) || [];
-
-	while (true) {
-		let prompt = ctx.message?.text || ctx.message?.caption || '';
-
-		if (ctx.message?.reply_to_message) {
-			const reply = ctx.message.reply_to_message;
-			const replyText = reply.text || reply.caption || '';
-			if (replyText) {
-				prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
+		if (ctx.update.business_message) {
+			const connectionId = ctx.update.business_message?.business_connection_id;
+			const customerId = ctx.update.business_message?.chat.id;
+			if (connectionId && customerId) {
+				userId = `business:${connectionId}:${customerId}`;
 			}
 		}
 
-		if (prompt) {
-			// Logic from chargeStars but integrated into the conversation
-			const billingUserId = ctx.from?.id;
-			const { balance, modelPreference } = await conversation.external(async () => {
-				const b = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
-				const mp = (await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'gemma4';
-				return { balance: b, modelPreference: mp };
-			});
+		// Initialize history from KV if it exists, otherwise start fresh
+		const history = (await conversation.external(async () => {
+			const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
+			return await historyManager.getHistory(userId, threadId);
+		})) || [];
 
-			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS.gemma4;
-			const amount = modelConfig.cost;
+		while (true) {
+			let prompt = ctx.message?.text || ctx.message?.caption || '';
 
-			if (balance >= amount) {
-				await ctx.replyWithChatAction('typing');
-				const balanceKey = `balance:${String(billingUserId)}`;
-				await conversation.external(() => ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance - amount)));
+			if (ctx.message?.reply_to_message) {
+				const reply = ctx.message.reply_to_message;
+				const replyText = reply.text || reply.caption || '';
+				if (replyText) {
+					prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
+				}
+			}
 
-				const systemPrompt = await conversation.external(async () => {
-					if (ctx.update.business_message) {
-						return SYSTEM_PROMPTS.BUSINESS_MODE;
-					}
-					const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
-					return customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
+			if (prompt) {
+				// Logic from chargeStars but integrated into the conversation
+				const billingUserId = ctx.from?.id;
+				const { balance, modelPreference } = await conversation.external(async () => {
+					const b = await getBalance(billingUserId || 0, env.CONVERSATION_HISTORY);
+					const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'gemma4';
+					return { balance: b, modelPreference: mp };
 				});
 
-				const messages = [
-					{ role: 'system', content: systemPrompt },
-					...history,
-					{ role: 'user', content: prompt },
-				];
+				const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS.gemma4;
+				const amount = modelConfig.cost;
 
-				const modelId = modelConfig.id;
+				if (balance >= amount) {
+					await ctx.replyWithChatAction('typing');
+					const balanceKey = `balance:${String(billingUserId)}`;
+					await conversation.external(() => env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance - amount)));
 
-				const responseContent = await streamAiResponseToTelegram(
-					ctx,
-					ctx.env.AI,
-					modelId,
-					messages,
-					{
-						type: 'message',
-						prompt,
-						chatId: ctx.chat?.id.toString(),
-						threadId,
-						businessConnectionId: ctx.update.business_message?.business_connection_id?.toString(),
-						messageId: ctx.message?.message_id,
-						userId: String(userId),
-						systemPrompt,
-						history,
-						telegramToken: ctx.env.SECRET_TELEGRAM_API_TOKEN,
-					},
-					[fetchTool, wikipediaTool, createTavilySearchTool(ctx.env.TAVILY_API_KEY || '')],
-				);
+					const systemPrompt = await conversation.external(async () => {
+						if (ctx.update.business_message) {
+							return SYSTEM_PROMPTS.BUSINESS_MODE;
+						}
+						const customPrompt = await env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
+						return customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
+					});
 
-				if (responseContent) {
-					history.push({ role: 'user', content: prompt });
-					history.push({ role: 'assistant', content: responseContent });
-					// Sync back to KV
-					await conversation.external(() => new HistoryManager(ctx.env.CONVERSATION_HISTORY).addMessage(userId, prompt, responseContent, threadId));
+					const messages = [
+						{ role: 'system', content: systemPrompt },
+						...history,
+						{ role: 'user', content: prompt },
+					];
+
+					const modelId = modelConfig.id;
+
+					const responseContent = await streamAiResponseToTelegram(
+						ctx,
+						env.AI,
+						modelId,
+						messages,
+						{
+							type: 'message',
+							prompt,
+							chatId: ctx.chat?.id.toString(),
+							threadId,
+							businessConnectionId: ctx.update.business_message?.business_connection_id?.toString(),
+							messageId: ctx.message?.message_id,
+							userId: String(userId),
+							systemPrompt,
+							history,
+							telegramToken: env.SECRET_TELEGRAM_API_TOKEN,
+						},
+						[fetchTool, wikipediaTool, createTavilySearchTool(env.TAVILY_API_KEY || '')],
+					);
+
+					if (responseContent) {
+						history.push({ role: 'user', content: prompt });
+						history.push({ role: 'assistant', content: responseContent });
+						// Sync back to KV
+						await conversation.external(() => new HistoryManager(env.CONVERSATION_HISTORY).addMessage(userId, prompt, responseContent, threadId));
+					}
+				} else {
+					// Handle insufficient balance (omitted full logic for brevity, can call ctx.replyWithInvoice)
+					await ctx.reply('Insufficient balance. Please top up your Stars.');
+					break;
 				}
-			} else {
-				// Handle insufficient balance (omitted full logic for brevity, can call ctx.replyWithInvoice)
-				await ctx.reply('Insufficient balance. Please top up your Stars.');
-				break;
 			}
-		}
 
-		ctx = (await conversation.wait()) as MyContext;
-	}
+			ctx = (await conversation.wait()) as MyContext;
+			ctx.env = env;
+			ctx.executionCtx = executionCtx;
+		}
+	};
 }
 
 function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionContext) {
@@ -295,7 +301,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}),
 	);
 	bot.use(conversations());
-	bot.use(createConversation(chatConversation as any));
+	bot.use(createConversation(createChatConversation(env, executionCtx) as any, 'chatConversation'));
 
 	const commands = new CommandGroup<MyContext>();
 
