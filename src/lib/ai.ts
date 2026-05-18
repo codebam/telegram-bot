@@ -1,5 +1,5 @@
 import { ParseMode } from '@grammyjs/types';
-import { markdownToHtml } from './utils.js';
+import { markdownToHtml } from '@codebam/shared';
 
 /**
  * Robustly extract text from various AI response formats.

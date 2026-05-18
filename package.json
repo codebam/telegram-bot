@@ -17,6 +17,7 @@
 	"dependencies": {
 		"@grammyjs/types": "^3.27.3",
 		"grammy": "^1.43.0",
-		"marked": "^18.0.3"
+		"marked": "^18.0.3",
+		"@codebam/shared": "*"
 	}
 }
