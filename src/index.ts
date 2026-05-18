@@ -783,9 +783,10 @@ export class AIWorkflow extends WorkflowEntrypoint<Environment, any> {
 export default {
 	async fetch(request: Request, env: Environment, executionCtx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
-		console.log(`[Fetch] Incoming request: ${request.method} ${url.href} (hostname: ${url.hostname})`);
+		const xSource = request.headers.get('x-source');
+		console.log(`[Fetch] Incoming request: ${request.method} ${url.href} (hostname: ${url.hostname}, source: ${xSource})`);
 
-		if (url.hostname === 'workflow.local' || url.pathname === '/workflow') {
+		if (url.hostname === 'workflow.local' || url.pathname === '/workflow' || xSource === 'webapp') {
 			console.log('[Fetch] Matches task endpoint, processing task...');
 			const task = (await request.json()) as Task;
 			console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
@@ -863,12 +864,7 @@ export default {
 		}
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		return (webhookCallback(bot, 'cloudflare-mod', {
-			onTimeout: 'return',
+		        onTimeout: 'return',
 		}) as any)(request, env, executionCtx);
-	},
-};
-re-mod', {
-			onTimeout: 'return',
-		}) as any)(request, env, executionCtx);
-	},
-};
+		},
+		};
