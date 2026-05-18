@@ -62,67 +62,23 @@ export async function customRunWithTools(
 		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}`);
 		try {
 			if (isGemini) {
+				const systemMessage = msgs.find((m) => m.role === 'system');
 				const otherMessages = msgs.filter((m) => m.role !== 'system');
 				const geminiInput: Record<string, unknown> = {
 					contents: otherMessages.map((m) => {
 						let role = m.role === 'assistant' ? 'model' : 'user';
 						const parts: any[] = [];
-						
-						if (m.role === 'tool') {
-							role = 'function';
-							parts.push({
-								functionResponse: {
-									name: m.name,
-									response: { content: m.content }
-								}
-							});
-						} else {
-							if (m.content) parts.push({ text: m.content });
-							if (m.tool_calls) {
-								for (const call of m.tool_calls) {
-									try {
-										const args = typeof call.function.arguments === 'string' 
-											? JSON.parse(call.function.arguments) 
-											: call.function.arguments;
-										parts.push({
-											functionCall: {
-												name: call.function.name,
-												args
-											}
-										});
-									} catch (e) {
-										console.error('[customRunWithTools] Failed to parse Gemini tool call args:', call.function.arguments, e);
-									}
-								}
-							}
-						}
+						if (m.content) parts.push({ text: m.content });
 						return { role, parts };
 					}),
-					// Cloudflare Gemini expects a flat array of function declarations directly in 'tools'
-					tools: cfTools.length > 0 ? cfTools.map(t => {
-						const params = JSON.parse(JSON.stringify(t.function.parameters));
-						if (params.properties) {
-							// Gemini doesn't like nested objects with no properties or 'object' type in some cases
-							if (params.properties.headers) delete params.properties.headers;
-							if (params.properties.body) delete params.properties.body;
-							
-							// Uppercase types as seen in some Google docs
-							params.type = 'OBJECT';
-							for (const key of Object.keys(params.properties)) {
-								if (params.properties[key].type) {
-									params.properties[key].type = params.properties[key].type.toUpperCase();
-								}
-							}
-						}
-						return {
-							name: t.function.name,
-							description: t.function.description,
-							parameters: params
-						};
-					}) : undefined,
 					stream
 				};
-				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.20 (sanitized tools) with input:', JSON.stringify(geminiInput));
+				if (systemMessage) {
+					geminiInput.system_instruction = {
+						parts: [{ text: systemMessage.content as string }]
+					};
+				}
+				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.21 (no tools, with system) with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
