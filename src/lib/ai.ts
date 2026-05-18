@@ -385,7 +385,25 @@ export async function streamAiResponseToTelegram(
 		console.log(`[streamAiResponseToTelegram] Stream finished. Content length: ${streamContent.length}`);
 
 		if (streamContent.trim()) {
-			if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
+			if (task.updateType === 'guest_message') {
+				if (task.guestQueryId) {
+					console.log('[streamAiResponseToTelegram] Answering guest_message via answerGuestQuery');
+					const messageText = (await markdownToHtml(streamContent)).slice(0, 4096);
+					await ctx.api
+						.answerGuestQuery(task.guestQueryId, {
+							type: 'article',
+							id: crypto.randomUUID(),
+							title: streamContent.slice(0, 64),
+							input_message_content: {
+								message_text: messageText,
+								parse_mode: 'HTML',
+							},
+						})
+						.catch((e: any) => console.log('Error answering guest query:', e));
+				} else {
+					console.log('[streamAiResponseToTelegram] guest_message has no guestQueryId, cannot answer');
+				}
+			} else if (task.updateType !== 'business_message') {
 				console.log('[streamAiResponseToTelegram] Sending final sendMessageDraft and sendMessage');
 				await sendMessageDraft(token, {
 					chat_id: task.chatId,
