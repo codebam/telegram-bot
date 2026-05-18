@@ -62,6 +62,7 @@ export async function customRunWithTools(
 		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}`);
 		try {
 			if (isGemini) {
+				const systemMessage = msgs.find((m) => m.role === 'system');
 				const otherMessages = msgs.filter((m) => m.role !== 'system');
 				const geminiInput: Record<string, unknown> = {
 					contents: otherMessages.map((m) => {
@@ -72,7 +73,12 @@ export async function customRunWithTools(
 					}),
 					stream
 				};
-				console.log('[customRunWithTools] Calling ai.run (Gemini) DEBUG (no tools) with input:', JSON.stringify(geminiInput));
+				if (systemMessage) {
+					geminiInput.system_instruction = {
+						parts: [{ text: systemMessage.content as string }]
+					};
+				}
+				console.log('[customRunWithTools] Calling ai.run (Gemini) DEBUG (system only) with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
