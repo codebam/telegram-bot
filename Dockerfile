@@ -1,3 +1,3 @@
-FROM docker.io/cloudflare/sandbox:0.10.1
+FROM docker.io/cloudflare/sandbox:0.10.1-python
 
 EXPOSE 3000

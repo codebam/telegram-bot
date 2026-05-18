@@ -131,26 +131,26 @@ import { getSandbox } from '@cloudflare/sandbox';
 export const createSandboxTool = (sandboxBinding: any, userId: string) => ({
 	name: 'code_interpreter',
 	description:
-		'Execute python or bash code in a secure sandbox environment. Use this tool for complex calculations, data processing, or running code snippets. The environment has internet access and common libraries installed.',
+		'Execute Python code in a secure sandbox environment. Use this tool for complex calculations, data processing, or running code snippets. The environment has internet access and common libraries (numpy, pandas, matplotlib) installed. Pass multi-line Python source as the `code` argument — do NOT wrap it in shell or `python -c`.',
 	parameters: {
 		type: 'object',
 		properties: {
-			command: {
+			code: {
 				type: 'string',
-				description: 'The shell command to execute, e.g. "python -c \'print(1+1)\'" or "ls -R"',
+				description: 'Python source code to execute, e.g. "print(sum(range(10)))" or a full multi-line program.',
 			},
 		},
-		required: ['command'],
+		required: ['code'],
 	},
-	function: async ({ command }: { command: string }) => {
+	function: async ({ code }: { code: string }) => {
 		try {
 			const sandbox = getSandbox(sandboxBinding, userId);
-			const result = await sandbox.exec(command);
+			const result = await sandbox.runCode(code, { language: 'python' });
 			return JSON.stringify({
-				stdout: result.stdout,
-				stderr: result.stderr,
-				exitCode: result.exitCode,
-				success: result.success,
+				stdout: result.logs.stdout.join(''),
+				stderr: result.logs.stderr.join(''),
+				error: result.error ? { name: result.error.name, message: result.error.message } : undefined,
+				results: result.results,
 			});
 		} catch (e) {
 			return `Error executing code: ${String(e)}`;
