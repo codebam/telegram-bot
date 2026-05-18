@@ -112,7 +112,7 @@ async function chargeStars(
 	task.updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
 	task.guestQueryId = ctx.update.guest_message?.guest_query_id;
 	task.businessConnectionId = ctx.update.business_message?.business_connection_id?.toString();
-	task.threadId = ctx.message?.message_thread_id ?? ctx.update.guest_message?.message_thread_id;
+	task.threadId = ctx.message?.message_thread_id ?? ctx.update.business_message?.message_thread_id ?? ctx.update.guest_message?.message_thread_id;
 	
 	const balanceKey = `balance:${String(billingUserId)}`;
 	const balance = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
@@ -140,9 +140,22 @@ async function chargeStars(
 
 		if (ctx.update.business_message) {
 			if (!task.systemPrompt) {
-				task.systemPrompt = SYSTEM_PROMPTS.BUSINESS_MODE;
+				let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
+				const connectionId = ctx.update.business_message?.business_connection_id;
+				if (connectionId) {
+					const ownerData = await getBusinessOwnerData(ctx, ctx.env, connectionId);
+					if (ownerData) {
+						prompt = prompt.replace(/{owner_name}/g, ownerData.name);
+						const facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
+						if (facts) {
+							prompt += `\n\nHere are some facts about you:\n${facts}`;
+						}
+					}
+				}
+				task.systemPrompt = prompt;
 			}
-		} else {
+		}
+ else {
 			const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
 			if (customPrompt) {
 				task.systemPrompt = customPrompt;
@@ -184,7 +197,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 		ctx.env = env;
 		ctx.executionCtx = executionCtx;
 		let userId: number | string = ctx.from!.id;
-		const threadId = ctx.message?.message_thread_id;
+		const threadId = ctx.message?.message_thread_id || ctx.update.business_message?.message_thread_id;
 
 		if (ctx.update.business_message) {
 			const connectionId = ctx.update.business_message?.business_connection_id;
@@ -201,11 +214,11 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 		})) || [];
 
 		while (true) {
-			let prompt = ctx.message?.text || ctx.message?.caption || '';
+			let prompt = ctx.message?.text || ctx.message?.caption || ctx.update.business_message?.text || ctx.update.business_message?.caption || '';
 
-			if (ctx.message?.reply_to_message) {
-				const reply = ctx.message.reply_to_message;
-				const replyText = reply.text || reply.caption || '';
+			const replyToMessage = ctx.message?.reply_to_message || ctx.update.business_message?.reply_to_message;
+			if (replyToMessage) {
+				const replyText = replyToMessage.text || replyToMessage.caption || '';
 				if (replyText) {
 					prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
 				}
@@ -213,7 +226,17 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 			if (prompt) {
 				// Logic from chargeStars but integrated into the conversation
-				const billingUserId = ctx.from?.id;
+				let billingUserId = ctx.from?.id;
+				if (ctx.update.business_message) {
+					const connectionId = ctx.update.business_message?.business_connection_id;
+					if (connectionId) {
+						const ownerData = await conversation.external(() => getBusinessOwnerData(ctx, env, connectionId));
+						if (ownerData?.id) {
+							billingUserId = ownerData.id;
+						}
+					}
+				}
+
 				const { balance, modelPreference } = await conversation.external(async () => {
 					const b = await getBalance(billingUserId || 0, env.CONVERSATION_HISTORY);
 					const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'gemma4';
@@ -230,7 +253,19 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 					const systemPrompt = await conversation.external(async () => {
 						if (ctx.update.business_message) {
-							return SYSTEM_PROMPTS.BUSINESS_MODE;
+							const connectionId = ctx.update.business_message?.business_connection_id;
+							let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
+							if (connectionId) {
+								const ownerData = await getBusinessOwnerData(ctx, env, connectionId);
+								if (ownerData) {
+									prompt = prompt.replace(/{owner_name}/g, ownerData.name);
+									const facts = await env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
+									if (facts) {
+										prompt += `\n\nHere are some facts about you:\n${facts}`;
+									}
+								}
+							}
+							return prompt;
 						}
 						const customPrompt = await env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
 						return customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
@@ -250,12 +285,12 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 						modelId,
 						messages,
 						{
-							type: 'message',
+							type: ctx.update.business_message ? 'business_message' : 'message',
 							prompt,
 							chatId: ctx.chat?.id.toString(),
 							threadId,
 							businessConnectionId: ctx.update.business_message?.business_connection_id?.toString(),
-							messageId: ctx.message?.message_id,
+							messageId: ctx.message?.message_id || ctx.update.business_message?.message_id,
 							userId: String(userId),
 							systemPrompt,
 							history,
