@@ -2,7 +2,7 @@ import { Bot, Context, webhookCallback } from 'grammy';
 import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import { HistoryManager, getBalance } from './lib/history_manager.js';
 import { markdownToHtml, fetchTool, wikipediaTool, createTavilySearchTool } from './lib/utils.js';
-import { streamAiResponseToTelegram } from './lib/ai.js';
+import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
 export interface Environment {
 	SECRET_TELEGRAM_API_TOKEN: string;
