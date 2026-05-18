@@ -1,5 +1,6 @@
 import { ParseMode } from '@grammyjs/types';
 import { markdownToHtml, type AiResponse, type Tool, type Task } from '@codebam/shared';
+import { runWithTools as cfRunWithTools } from '@cloudflare/ai-utils';
 
 /**
  * Robustly extract text from various AI response formats.
@@ -29,8 +30,11 @@ export function extractText(obj: string | AiResponse | any): string {
 	if (response.candidates && Array.isArray(response.candidates) && response.candidates.length > 0)
 		return extractText(response.candidates[0]);
 	if (response.content) return extractText(response.content);
-	if (response.parts && Array.isArray(response.parts) && response.parts.length > 0)
-		return extractText(response.parts[0]);
+	if (response.parts && Array.isArray(response.parts) && response.parts.length > 0) {
+		for (const part of response.parts) {
+			if (part.text) return part.text;
+		}
+	}
 
 	return '';
 }
@@ -45,201 +49,38 @@ export async function customRunWithTools(
 	config: { streamFinalResponse: boolean }
 ): Promise<AiResponse | ReadableStream> {
 	console.log(`[customRunWithTools] Model: ${model}, Tools: ${input.tools?.length || 0}, Stream: ${config.streamFinalResponse}`);
-	const messages = [...input.messages];
-	const tools = input.tools || [];
-	const isGemini = model.includes('google/gemini');
 
-	const cfTools = tools.map((t: Tool) => ({
-		type: 'function',
-		function: {
-			name: t.name,
-			description: t.description,
-			parameters: t.parameters
-		}
+	// Map our tools to the format expected by ai-utils
+	const tools = (input.tools || []).map((t: Tool) => ({
+		name: t.name,
+		description: t.description,
+		parameters: t.parameters,
+		run: t.function
 	}));
 
-	const runModel = async (msgs: any[], stream: boolean) => {
-		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}`);
-		try {
-			if (isGemini) {
-				const systemMessage = msgs.find((m) => m.role === 'system');
-				const otherMessages = msgs.filter((m) => m.role !== 'system');
-				const geminiInput: Record<string, unknown> = {
-					contents: otherMessages.map((m) => {
-						let role = m.role === 'assistant' ? 'model' : 'user';
-						const parts: any[] = [];
-						
-						if (m.role === 'tool') {
-							role = 'user'; // Cloudflare Gemini only supports 'user' and 'model'
-							parts.push({
-								functionResponse: {
-									name: m.name,
-									response: { content: m.content }
-								}
-							});
-						} else {
-							if (m.content) parts.push({ text: m.content });
-							if (m.tool_calls) {
-								for (const call of m.tool_calls) {
-									try {
-										const args = typeof call.function.arguments === 'string' 
-											? JSON.parse(call.function.arguments) 
-											: call.function.arguments;
-										parts.push({
-											functionCall: {
-												name: call.function.name,
-												args
-											}
-										});
-									} catch (e) {
-										console.error('[customRunWithTools] Failed to parse Gemini tool call args:', call.function.arguments, e);
-									}
-								}
-							}
-						}
-						return { role, parts };
-					}),
-					// Cloudflare Gemini expects functionDeclarations (camelCase) inside an object in 'tools'
-					tools: cfTools.length > 0 ? [{
-						functionDeclarations: cfTools.map(t => ({
-							name: t.function.name,
-							description: t.function.description,
-							parameters: t.function.parameters
-						}))
-					}] : undefined,
-					stream
-				};
-				if (systemMessage) {
-					geminiInput.system_instruction = {
-						parts: [{ text: systemMessage.content as string }]
-					};
-				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.23 (camelCase tools) with input:', JSON.stringify(geminiInput));
-				const res = await ai.run(model, geminiInput);
-				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
-				return res;
-			}
-			
-			const options: any = {
-				messages: msgs,
-				tools: cfTools.length > 0 ? cfTools : undefined,
-				stream,
-				parallel_tool_calls: false,
-				tool_choice: 'auto'
-			};
+	try {
+		// Use the official Cloudflare utility which handles multi-turn and platform specific logic
+		// This handles Gemini's thoughtSignature and role mapping automatically
+		const response = await cfRunWithTools(ai, model, {
+			messages: input.messages,
+			tools,
+			streamFinalResponse: config.streamFinalResponse,
+			maxRecursiveToolRuns: 5
+		});
 
-			console.log(`[customRunWithTools] Calling ai.run (Workers AI) with ${msgs.length} messages and ${cfTools.length} tools...`);
-			const res = await ai.run(model, options);
-			console.log('[customRunWithTools] ai.run (Workers AI) call returned.');
-			return res;
-		} catch (e) {
-			console.error(`[customRunWithTools] ai.run failed for model ${model}:`, e);
-			throw e;
-		}
-	};
-
-	let turn = 0;
-	while (turn < 5) {
-		console.log(`[customRunWithTools] Starting turn ${turn + 1}...`);
-		
-		const shouldStream = turn === 4 || cfTools.length === 0 ? config.streamFinalResponse : false;
-		const response = await runModel(messages, shouldStream);
-		
-		if (shouldStream) {
-			console.log('[customRunWithTools] Returning streaming response.');
+		// If it's a stream, return it directly
+		if (response instanceof ReadableStream) {
+			console.log('[customRunWithTools] Returning streaming response from ai-utils.');
 			return response;
 		}
 
-		const aiRes = response as AiResponse;
-		let toolCalls: any[] = [];
-		if (aiRes?.tool_calls) {
-			toolCalls = [...aiRes.tool_calls];
-		} else if (aiRes?.choices?.[0]?.message?.tool_calls) {
-			toolCalls = [...aiRes.choices[0].message.tool_calls];
-		} else if (aiRes?.candidates?.[0]?.content?.parts) {
-			// Extract Gemini function calls
-			for (const part of aiRes.candidates[0].content.parts as any[]) {
-				if (part.functionCall) {
-					toolCalls.push({
-						id: `call_${Math.random().toString(36).substring(2, 9)}`,
-						type: 'function',
-						function: {
-							name: part.functionCall.name,
-							arguments: typeof part.functionCall.args === 'string' 
-								? part.functionCall.args 
-								: JSON.stringify(part.functionCall.args)
-						}
-					});
-				}
-			}
-		}
-
-		let responseText = aiRes?.response || aiRes?.choices?.[0]?.message?.content || '';
-
-		if (toolCalls.length > 0) {
-			console.log(`[customRunWithTools] Found ${toolCalls.length} tool calls.`);
-			const normalizedToolCalls = toolCalls.map((call: any, index: number) => {
-				const name = call.name || (call.function && call.function.name);
-				let args = call.arguments || (call.function && call.function.arguments);
-				if (typeof args !== 'string') {
-					try {
-						args = JSON.stringify(args);
-					} catch {
-						args = '{}';
-					}
-				}
-				return {
-					id: call.id || `call_${Math.random().toString(36).substring(2, 9)}_${index}`,
-					type: 'function',
-					function: { name, arguments: args }
-				};
-			});
-
-			messages.push({
-				role: 'assistant',
-				content: responseText,
-				tool_calls: normalizedToolCalls
-			});
-
-			for (const call of normalizedToolCalls) {
-				const toolName = call.function.name;
-				const toolId = call.id;
-				const toolArgsString = call.function.arguments;
-				const tool = tools.find((t: Tool) => t.name === toolName);
-
-				if (tool && tool.function) {
-					console.log(`[customRunWithTools] Executing tool: ${toolName}`);
-					try {
-						let parsedArgs;
-						try {
-							parsedArgs = JSON.parse(toolArgsString);
-						} catch {
-							parsedArgs = toolArgsString;
-						}
-						const result = await tool.function(parsedArgs);
-						console.log(`[customRunWithTools] Tool ${toolName} execution successful.`);
-						messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: String(result) });
-					} catch (e) {
-						console.error(`[customRunWithTools] Tool execution failed: ${toolName}`, e);
-						messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: String(e) });
-					}
-				} else {
-					messages.push({ role: 'tool', tool_call_id: toolId, name: toolName, content: 'Tool not found' });
-				}
-			}
-		} else {
-			console.log('[customRunWithTools] No more tool calls. Finishing...');
-			if (config.streamFinalResponse) {
-				console.log('[customRunWithTools] Re-running final model call for streaming...');
-				return await runModel(messages, true);
-			}
-			return aiRes;
-		}
-		turn++;
+		// Otherwise, wrap it in our AiResponse interface
+		console.log('[customRunWithTools] Returning direct response from ai-utils.');
+		return response as unknown as AiResponse;
+	} catch (e: any) {
+		console.error(`[customRunWithTools] ai-utils failed for model ${model}:`, e);
+		throw e;
 	}
-
-	console.log('[customRunWithTools] Maximum turns reached.');
-	return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
 }
 
 export async function sendMessageDraft(token: string, data: any) {
@@ -247,56 +88,31 @@ export async function sendMessageDraft(token: string, data: any) {
 		await fetch(`https://api.telegram.org/bot${token}/sendMessageDraft`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(data)
+			body: JSON.stringify(data),
 		});
 	} catch (e) {
-		console.error('sendMessageDraft failed', e);
+		console.log('Error sending draft update:', e);
 	}
 }
 
 /**
- * Async generator that yields AI response chunks.
+ * Get AI stream for a model.
  */
-export async function* getAiStream(
-	ai: any,
-	modelId: string,
-	messages: any[],
-	tools: Tool[] = []
-): AsyncGenerator<string> {
-	console.log(`[getAiStream] Starting for model: ${modelId}`);
-	const aiResponse = await customRunWithTools(
-		ai,
-		modelId,
-		{
-			messages,
-			tools,
-		},
-		{ streamFinalResponse: true },
-	);
+export async function* getAiStream(ai: any, model: string, messages: any[], tools: Tool[] = []) {
+	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
 
-	if (typeof aiResponse === 'object' && aiResponse !== null && 'getReader' in aiResponse) {
-		console.log('[getAiStream] aiResponse is a ReadableStream');
-		const stream = aiResponse as ReadableStream;
-		const reader = stream.getReader();
+	if (response instanceof ReadableStream) {
+		const reader = response.getReader();
 		const decoder = new TextDecoder();
-
 		while (true) {
 			const { done, value } = await reader.read();
-			if (done) {
-				console.log('[getAiStream] reader.read() done: true');
-				break;
-			}
-
-			const chunk = decoder.decode(value, { stream: true });
+			if (done) break;
+			const chunk = decoder.decode(value);
 			const lines = chunk.split('\n');
-
 			for (const line of lines) {
 				if (line.startsWith('data: ')) {
-					const data = line.slice(6);
-					if (data === '[DONE]') {
-						console.log('[getAiStream] data: [DONE] received');
-						break;
-					}
+					const data = line.substring(6);
+					if (data === '[DONE]') break;
 					try {
 						const parsed = JSON.parse(data);
 						const text = extractText(parsed);
@@ -309,7 +125,7 @@ export async function* getAiStream(
 		}
 	} else {
 		console.log('[getAiStream] aiResponse is not a stream, yielding extractText(aiResponse)');
-		yield extractText(aiResponse);
+		yield extractText(response);
 	}
 }
 
@@ -430,36 +246,8 @@ export async function streamAiResponseToTelegram(
 						business_connection_id: task.businessConnectionId,
 						reply_to_message_id: task.messageId,
 					})
-					.catch((e: Error) => console.error('Error sending final reply:', e));
-			} else if (task.updateType === 'guest_message' && task.guestQueryId) {
-				try {
-					await ctx.api.answerGuestQuery(task.guestQueryId, {
-						type: 'article',
-						id: crypto.randomUUID(),
-						title: 'AI Response',
-						input_message_content: {
-							message_text: await markdownToHtml(streamContent),
-							parse_mode: 'HTML',
-						},
-					});
-				} catch (e) {
-					console.error('[streamAiResponseToTelegram] Failed to answer guest query:', e);
-				}
-			} else {
-				console.log(`[streamAiResponseToTelegram] Sending final reply to business/guest: ${task.chatId}`);
-				try {
-					const result = await ctx.reply(await markdownToHtml(streamContent), {
-						parse_mode: 'HTML',
-						business_connection_id: task.businessConnectionId,
-						reply_to_message_id: task.messageId,
-					});
-					console.log('[streamAiResponseToTelegram] Final business reply sent successfully:', JSON.stringify(result));
-				} catch (e) {
-					console.error('[streamAiResponseToTelegram] Failed to send final business reply:', e);
-				}
+					.catch((e: any) => console.log('Error sending final message:', e));
 			}
-		} else {
-			console.log('[streamAiResponseToTelegram] streamContent was empty, nothing to send.');
 		}
 	}
 	return streamContent;
