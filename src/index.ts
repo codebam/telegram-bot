@@ -180,7 +180,6 @@ async function chargeStars(
 }
 
 async function chatConversation(conversation: MyConversation, ctx: MyContext) {
-	const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
 	let userId: number | string = ctx.from!.id;
 	const threadId = ctx.message?.message_thread_id;
 
@@ -193,7 +192,7 @@ async function chatConversation(conversation: MyConversation, ctx: MyContext) {
 	}
 
 	// Initialize history from KV if it exists, otherwise start fresh
-	const history = (await conversation.external(() => historyManager.getHistory(userId, threadId))) || [];
+	const history = (await conversation.external(() => new HistoryManager(ctx.env.CONVERSATION_HISTORY).getHistory(userId, threadId))) || [];
 
 	while (true) {
 		let prompt = ctx.message?.text || ctx.message?.caption || '';
@@ -261,7 +260,7 @@ async function chatConversation(conversation: MyConversation, ctx: MyContext) {
 					history.push({ role: 'user', content: prompt });
 					history.push({ role: 'assistant', content: responseContent });
 					// Sync back to KV
-					await conversation.external(() => historyManager.addMessage(userId, prompt, responseContent, threadId));
+					await conversation.external(() => new HistoryManager(ctx.env.CONVERSATION_HISTORY).addMessage(userId, prompt, responseContent, threadId));
 				}
 			} else {
 				// Handle insufficient balance (omitted full logic for brevity, can call ctx.replyWithInvoice)
