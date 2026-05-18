@@ -54,7 +54,7 @@ export async function customRunWithTools(
 	const tools = (input.tools || []).map((t: Tool) => ({
 		name: t.name,
 		description: t.description,
-		parameters: t.parameters,
+		parameters: t.parameters as any,
 		run: t.function
 	}));
 
@@ -63,7 +63,7 @@ export async function customRunWithTools(
 		// This handles Gemini's thoughtSignature and role mapping automatically
 		const response = await cfRunWithTools(ai, model, {
 			messages: input.messages,
-			tools,
+			tools: tools as any,
 			streamFinalResponse: config.streamFinalResponse,
 			maxRecursiveToolRuns: 5
 		});
