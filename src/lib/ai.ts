@@ -1,11 +1,10 @@
 import { ParseMode } from '@grammyjs/types';
-import { markdownToHtml } from '@codebam/shared';
+import { markdownToHtml, type AiResponse, type Tool, type Task } from '@codebam/shared';
 
 /**
  * Robustly extract text from various AI response formats.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function extractText(obj: any): string {
+export function extractText(obj: string | AiResponse | any): string {
 	if (typeof obj === 'string') {
 		return obj;
 	}
@@ -13,17 +12,22 @@ export function extractText(obj: any): string {
 		return '';
 	}
 
-	if (typeof obj.response === 'string') return obj.response;
-	if (typeof obj.text === 'string') return obj.text;
-	if (typeof obj.content === 'string') return obj.content;
-	if (typeof obj.delta === 'string') return obj.delta;
+	const response = obj as any;
 
-	if (obj.choices && Array.isArray(obj.choices) && obj.choices.length > 0) return extractText(obj.choices[0]);
-	if (obj.message) return extractText(obj.message);
-	if (obj.delta) return extractText(obj.delta);
-	if (obj.candidates && Array.isArray(obj.candidates) && obj.candidates.length > 0) return extractText(obj.candidates[0]);
-	if (obj.content) return extractText(obj.content);
-	if (obj.parts && Array.isArray(obj.parts) && obj.parts.length > 0) return extractText(obj.parts[0]);
+	if (typeof response.response === 'string') return response.response;
+	if (typeof response.text === 'string') return response.text;
+	if (typeof response.content === 'string') return response.content;
+	if (typeof response.delta === 'string') return response.delta;
+
+	if (response.choices && Array.isArray(response.choices) && response.choices.length > 0)
+		return extractText(response.choices[0]);
+	if (response.message) return extractText(response.message);
+	if (response.delta) return extractText(response.delta);
+	if (response.candidates && Array.isArray(response.candidates) && response.candidates.length > 0)
+		return extractText(response.candidates[0]);
+	if (response.content) return extractText(response.content);
+	if (response.parts && Array.isArray(response.parts) && response.parts.length > 0)
+		return extractText(response.parts[0]);
 
 	return '';
 }
@@ -32,25 +36,22 @@ export function extractText(obj: any): string {
  * Custom runner that supports tool calls across different AI models.
  */
 export async function customRunWithTools(
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	ai: any,
 	model: string,
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	input: { messages: any[]; tools?: any[] },
-	config: { streamFinalResponse: boolean },
-) {
+	input: { messages: any[]; tools?: Tool[] },
+	config: { streamFinalResponse: boolean }
+): Promise<AiResponse | ReadableStream> {
 	const messages = [...input.messages];
 	const tools = input.tools || [];
 	const isGemini = model.includes('google/gemini');
 
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	const cfTools = tools.map((t: any) => ({
+	const cfTools = tools.map((t: Tool) => ({
 		type: 'function',
 		function: {
 			name: t.name,
 			description: t.description,
-			parameters: t.parameters,
-		},
+			parameters: t.parameters
+		}
 	}));
 
 	if (tools.length > 0) {
@@ -60,8 +61,7 @@ export async function customRunWithTools(
 			messages.unshift(systemMsg);
 		}
 		const toolInstructions = tools
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			.map((t: any) => {
+			.map((t: Tool) => {
 				return `- Name: ${t.name}\n  Description: ${t.description}\n  Parameters: ${JSON.stringify(t.parameters)}`;
 			})
 			.join('\n');
@@ -71,7 +71,6 @@ export async function customRunWithTools(
 		systemMsg.content = systemMsg.content + promptInstruction;
 	}
 
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const runModel = async (msgs: any[], stream: boolean) => {
 		if (isGemini) {
 			const systemMessage = msgs.find((m) => m.role === 'system');
@@ -79,28 +78,30 @@ export async function customRunWithTools(
 			const geminiInput: Record<string, unknown> = {
 				contents: otherMessages.map((m) => ({
 					role: m.role === 'assistant' ? 'model' : 'user',
-					parts: [{ text: m.content as string }],
+					parts: [{ text: m.content as string }]
 				})),
-				stream,
+				stream
 			};
 			if (systemMessage) {
 				geminiInput.system_instruction = {
-					parts: [{ text: systemMessage.content as string }],
+					parts: [{ text: systemMessage.content as string }]
 				};
 			}
 			return await ai.run(model, geminiInput);
 		}
-		return await ai.run(model, { messages: msgs, tools: cfTools.length > 0 ? cfTools : undefined, stream });
+		return await ai.run(model, {
+			messages: msgs,
+			tools: cfTools.length > 0 ? cfTools : undefined,
+			stream
+		});
 	};
 
 	if (cfTools.length === 0) {
-		return await runModel(messages, config.streamFinalResponse);
+		return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
 	}
 
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	const response = (await runModel(messages, false)) as any;
+	const response = (await runModel(messages, false)) as AiResponse;
 
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	let toolCalls: any[] = [];
 	if (response?.tool_calls) {
 		toolCalls = [...response.tool_calls];
@@ -122,12 +123,14 @@ export async function customRunWithTools(
 			}
 
 			let argsString = match[2].trim();
-			argsString = argsString.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":').replace(/:\s*'([^']*)'/g, ': "$1"');
+			argsString = argsString
+				.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
+				.replace(/:\s*'([^']*)'/g, ': "$1"');
 
 			toolCalls.push({
 				id: `call_${Math.random().toString(36).substring(2, 9)}`,
 				type: 'function',
-				function: { name, arguments: argsString },
+				function: { name, arguments: argsString }
 			});
 		}
 
@@ -140,7 +143,7 @@ export async function customRunWithTools(
 				toolCalls.push({
 					id: `call_${Math.random().toString(36).substring(2, 9)}`,
 					type: 'function',
-					function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) },
+					function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) }
 				});
 			} catch (e) {
 				console.error('Failed to parse tool call:', content, e);
@@ -154,7 +157,6 @@ export async function customRunWithTools(
 	}
 
 	if (toolCalls.length > 0) {
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		const normalizedToolCalls = toolCalls.map((call: any, index: number) => {
 			const name = call.name || (call.function && call.function.name);
 			let args = call.arguments || (call.function && call.function.arguments);
@@ -168,22 +170,21 @@ export async function customRunWithTools(
 			return {
 				id: call.id || `call_${Math.random().toString(36).substring(2, 9)}_${index}`,
 				type: 'function',
-				function: { name, arguments: args },
+				function: { name, arguments: args }
 			};
 		});
 
 		messages.push({
 			role: 'assistant',
 			content: responseText,
-			tool_calls: normalizedToolCalls,
+			tool_calls: normalizedToolCalls
 		});
 
 		for (const call of normalizedToolCalls) {
 			const toolName = call.function.name;
 			const toolId = call.id;
 			const toolArgsString = call.function.arguments;
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const tool = tools.find((t: any) => t.name === toolName);
+			const tool = tools.find((t: Tool) => t.name === toolName);
 
 			if (tool && tool.function) {
 				try {
@@ -203,11 +204,11 @@ export async function customRunWithTools(
 			}
 		}
 
-		return await runModel(messages, config.streamFinalResponse);
+		return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
 	}
 
 	if (config.streamFinalResponse) {
-		return await runModel(messages, true);
+		return (await runModel(messages, true)) as AiResponse | ReadableStream;
 	}
 
 	return response;
@@ -229,17 +230,12 @@ export async function sendMessageDraft(token: string, data: any) {
  * Stream AI response to Telegram, with periodic updates to avoid rate limits.
  */
 export async function streamAiResponseToTelegram(
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	ctx: any,
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	ai: any,
 	modelId: string,
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	messages: any[],
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	task: any,
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	tools: any[] = [],
+	task: Task,
+	tools: Tool[] = []
 ): Promise<string> {
 	const token = task.telegramToken || task.token || ctx.env.SECRET_TELEGRAM_API_TOKEN;
 	const draftId = task.updateId || Date.now();
