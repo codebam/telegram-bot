@@ -1,0 +1,22 @@
+{
+	"name": "bot",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"build": "wrangler types --check && tsc",
+		"deploy": "wrangler deploy",
+		"start": "wrangler dev",
+		"check": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@types/node": "^25.8.0",
+		"typescript": "^6.0.3",
+		"wrangler": "^4.92.0"
+	},
+	"dependencies": {
+		"grammy": "^1.35.0",
+		"@grammyjs/types": "^3.17.1",
+		"marked": "^18.0.3"
+	}
+}
