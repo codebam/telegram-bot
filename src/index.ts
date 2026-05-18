@@ -157,16 +157,17 @@ async function chargeStars(
 	}
 
 	task.userId = userId;
-	task.senderId = ctx.from?.id || (ctx.update as any).guest_message?.from?.id;
-	task.chatId = ctx.chat?.id.toString() || (ctx.update as any).guest_message?.chat?.id?.toString();
+	task.senderId = ctx.from?.id || ctx.update.guest_message?.from?.id;
+	task.chatId = ctx.chat?.id.toString() || ctx.update.guest_message?.chat?.id?.toString();
 	task.updateId = ctx.update.update_id;
-	task.messageId = ctx.message?.message_id ?? ctx.update.business_message?.message_id ?? (ctx.update as any).guest_message?.message_id;
+	task.messageId =
+		ctx.message?.message_id ??
+		ctx.update.business_message?.message_id ??
+		ctx.update.guest_message?.message_id;
 	task.updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	task.guestQueryId = (ctx.update as any).guest_message?.guest_query_id;
+	task.guestQueryId = ctx.update.guest_message?.guest_query_id;
 	task.businessConnectionId = ctx.update.business_message?.business_connection_id?.toString();
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	task.threadId = ctx.message?.message_thread_id ?? (ctx.update as any).guest_message?.message_thread_id;
+	task.threadId = ctx.message?.message_thread_id ?? ctx.update.guest_message?.message_thread_id;
 	
 	const balanceKey = `balance:${String(billingUserId)}`;
 	const balance = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
@@ -213,8 +214,7 @@ async function chargeStars(
 			ctx.env.AI_WORKFLOW.create({ params: task }).catch(console.error)
 		);
 	} else {
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		if (ctx.update.business_message || (ctx.update as any).guest_message) {
+		if (ctx.update.business_message || ctx.update.guest_message) {
 			await ctx.reply(
 				'Insufficient balance. Please go to direct messages and use /load to top up your Stars.'
 			);
@@ -317,8 +317,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 					historyUserId = `business:${connectionId}:${customerId}`;
 				}
 			}
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const threadId = ctx.message?.message_thread_id ?? (ctx.update as any).guest_message?.message_thread_id;
+			const threadId = ctx.message?.message_thread_id ?? ctx.update.guest_message?.message_thread_id;
 			await historyManager.clearHistory(historyUserId, threadId);
 			await ctx.reply('History cleared');
 		}
@@ -626,9 +625,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		await chargeStars(ctx, { type: 'message', prompt });
 	});
 
-	// @ts-ignore
 	bot.on('guest_message', async (ctx) => {
-		// @ts-ignore
 		const guestMessage = ctx.update.guest_message;
 		let prompt = guestMessage.text?.toString() ?? '';
 		const token = ctx.env.SECRET_TELEGRAM_API_TOKEN;
@@ -654,35 +651,39 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			}
 		}
 
-		if (prompt.includes('/start')) {
-			await ctx.reply(
-				'Welcome! Here are my commands:\n' +
-					'/balance - Check your current Star balance\n' +
-					'/load <amount> - Top up your balance with Telegram Stars\n' +
-					'/photo <prompt> - Generate an image (100 Stars)\n' +
-					'/model <name> - Switch AI model and see costs\n' +
-					'/ttl <1-5> - Set the TTL for bot-to-bot responses\n' +
-					'/code <prompt> - Generate code snippets\n' +
-					'/prompt <"prompt"> - Set your custom system prompt (use "" or reset to clear)\n' +
-					'/facts <"facts"> - Set facts about yourself for business mode (use "" or reset to clear)\n' +
-					'/request <prompt> - Make arbitrary API requests (uses fetch tool)\n' +
-					'<prompt> - Generate text (may use tools if supported by model)\n' +
-					'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
-					'/clear - Clear your conversation history\n\n' +
-					'New users start with 200 free credits!\n\n' +
-					'Click the button below to open the Web App!',
-				{
-					reply_markup: {
-						inline_keyboard: [
-							[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }],
-						],
-					},
+		if (prompt.includes('/start') && guestMessage.guest_query_id) {
+			await ctx.api.answerGuestQuery(guestMessage.guest_query_id, {
+				type: 'article',
+				id: crypto.randomUUID(),
+				title: 'Welcome',
+				input_message_content: {
+					message_text:
+						'Welcome! Here are my commands:\n' +
+						'/balance - Check your current Star balance\n' +
+						'/load <amount> - Top up your balance with Telegram Stars\n' +
+						'/photo <prompt> - Generate an image (100 Stars)\n' +
+						'/model <name> - Switch AI model and see costs\n' +
+						'/ttl <1-5> - Set the TTL for bot-to-bot responses\n' +
+						'/code <prompt> - Generate code snippets\n' +
+						'/prompt <"prompt"> - Set your custom system prompt (use "" or reset to clear)\n' +
+						'/facts <"facts"> - Set facts about yourself for business mode (use "" or reset to clear)\n' +
+						'/request <prompt> - Make arbitrary API requests (uses fetch tool)\n' +
+						'<prompt> - Generate text (may use tools if supported by model)\n' +
+						'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
+						'/clear - Clear your conversation history\n\n' +
+						'New users start with 200 free credits!\n\n' +
+						'Click the button below to open the Web App!',
 				},
-			);
+				reply_markup: {
+					inline_keyboard: [
+						[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }],
+					],
+				},
+			});
 			return;
 		}
 
-		await chargeStars(ctx, env, executionCtx, { type: 'message', prompt });
+		await chargeStars(ctx, { type: 'message', prompt });
 	});
 }
 

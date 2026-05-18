@@ -331,12 +331,24 @@ export async function streamAiResponseToTelegram(
 				draft_id: draftId,
 				finish: true,
 			});
-			await ctx.api.sendMessage(task.chatId, await markdownToHtml(streamContent), {
-				parse_mode: 'HTML',
-				message_thread_id: task.threadId,
-				business_connection_id: task.businessConnectionId,
-				reply_to_message_id: task.messageId,
-			}).catch((e: Error) => console.error('Error sending final reply:', e));
+			await ctx.api
+				.sendMessage(task.chatId, await markdownToHtml(streamContent), {
+					parse_mode: 'HTML',
+					message_thread_id: task.threadId,
+					business_connection_id: task.businessConnectionId,
+					reply_to_message_id: task.messageId,
+				})
+				.catch((e: Error) => console.error('Error sending final reply:', e));
+		} else if (task.updateType === 'guest_message' && task.guestQueryId) {
+			await ctx.api.answerGuestQuery(task.guestQueryId, {
+				type: 'article',
+				id: crypto.randomUUID(),
+				title: 'AI Response',
+				input_message_content: {
+					message_text: await markdownToHtml(streamContent),
+					parse_mode: 'HTML',
+				},
+			});
 		} else {
 			await ctx.reply(await markdownToHtml(streamContent), { parse_mode: 'HTML' });
 		}
