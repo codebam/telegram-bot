@@ -18,11 +18,14 @@ export function extractText(obj: string | AiResponse | any): string {
 	if (typeof response.text === 'string') return response.text;
 	if (typeof response.content === 'string') return response.content;
 	if (typeof response.delta === 'string') return response.delta;
+	if (typeof response.reasoning === 'string') return response.reasoning;
+	if (typeof response.reasoning_content === 'string') return response.reasoning_content;
 
 	if (response.choices && Array.isArray(response.choices) && response.choices.length > 0)
 		return extractText(response.choices[0]);
 	if (response.message) return extractText(response.message);
 	if (response.delta) return extractText(response.delta);
+	if (response.tool_calls) return ''; // Skip tool calls in extraction for now
 	if (response.candidates && Array.isArray(response.candidates) && response.candidates.length > 0)
 		return extractText(response.candidates[0]);
 	if (response.content) return extractText(response.content);
