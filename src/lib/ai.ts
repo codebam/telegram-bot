@@ -46,7 +46,7 @@ export async function customRunWithTools(
 	const tools = input.tools || [];
 	const isGemini = model.includes('google/gemini');
 
-	const cfTools = model.includes('gemma-4') ? [] : tools.map((t: Tool) => ({
+	const cfTools = tools.map((t: Tool) => ({
 		type: 'function',
 		function: {
 			name: t.name,
@@ -96,11 +96,19 @@ export async function customRunWithTools(
 				return res;
 			}
 			console.log(`[customRunWithTools] Calling ai.run (Workers AI) with ${msgs.length} messages and ${cfTools.length} tools...`);
-			const res = await ai.run(model, {
+			
+			const options: any = {
 				messages: msgs,
 				tools: cfTools.length > 0 ? cfTools : undefined,
 				stream
-			});
+			};
+
+			if (model.includes('gemma-4')) {
+				options.parallel_tool_calls = false;
+				options.tool_choice = 'auto';
+			}
+
+			const res = await ai.run(model, options);
 			console.log('[customRunWithTools] ai.run (Workers AI) call returned.');
 			return res;
 		} catch (e) {
