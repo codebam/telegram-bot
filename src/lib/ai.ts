@@ -73,29 +73,40 @@ export async function customRunWithTools(
 	}
 
 	const runModel = async (msgs: any[], stream: boolean) => {
-		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}`);
-		if (isGemini) {
-			const systemMessage = msgs.find((m) => m.role === 'system');
-			const otherMessages = msgs.filter((m) => m.role !== 'system');
-			const geminiInput: Record<string, unknown> = {
-				contents: otherMessages.map((m) => ({
-					role: m.role === 'assistant' ? 'model' : 'user',
-					parts: [{ text: m.content as string }]
-				})),
-				stream
-			};
-			if (systemMessage) {
-				geminiInput.system_instruction = {
-					parts: [{ text: systemMessage.content as string }]
+		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}`);
+		try {
+			if (isGemini) {
+				const systemMessage = msgs.find((m) => m.role === 'system');
+				const otherMessages = msgs.filter((m) => m.role !== 'system');
+				const geminiInput: Record<string, unknown> = {
+					contents: otherMessages.map((m) => ({
+						role: m.role === 'assistant' ? 'model' : 'user',
+						parts: [{ text: m.content as string }]
+					})),
+					stream
 				};
+				if (systemMessage) {
+					geminiInput.system_instruction = {
+						parts: [{ text: systemMessage.content as string }]
+					};
+				}
+				console.log('[customRunWithTools] Calling ai.run (Gemini)...');
+				const res = await ai.run(model, geminiInput);
+				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
+				return res;
 			}
-			return await ai.run(model, geminiInput);
+			console.log(`[customRunWithTools] Calling ai.run (Workers AI) with ${msgs.length} messages and ${cfTools.length} tools...`);
+			const res = await ai.run(model, {
+				messages: msgs,
+				tools: cfTools.length > 0 ? cfTools : undefined,
+				stream
+			});
+			console.log('[customRunWithTools] ai.run (Workers AI) call returned.');
+			return res;
+		} catch (e) {
+			console.error(`[customRunWithTools] ai.run failed for model ${model}:`, e);
+			throw e;
 		}
-		return await ai.run(model, {
-			messages: msgs,
-			tools: cfTools.length > 0 ? cfTools : undefined,
-			stream
-		});
 	};
 
 	if (cfTools.length === 0) {
