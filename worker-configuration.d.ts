@@ -5,7 +5,7 @@ interface __BaseEnv_Env {
 	CONVERSATION_HISTORY: KVNamespace;
 	R2: R2Bucket;
 	AI: Ai;
-	AI_WORKFLOW: Workflow<Parameters<import("./src/index").AIWorkflow['run']>[0]['payload']>;
+	MESSAGE_QUEUE: Queue<import("./src/index").Task>;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
@@ -15,7 +15,7 @@ declare namespace Cloudflare {
 		CONVERSATION_HISTORY: KVNamespace;
 		R2: R2Bucket;
 		AI: Ai;
-		AI_WORKFLOW: Workflow<Parameters<import("./src/index").AIWorkflow['run']>[0]['payload']>;
+		MESSAGE_QUEUE: Queue<import("./src/index").Task>;
 	}
 	interface Env extends __BaseEnv_Env {}
 }

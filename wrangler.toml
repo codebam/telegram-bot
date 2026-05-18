@@ -14,26 +14,11 @@ id = "7c147881ce7d42b8811bfbf8c38e3ee4"
 binding = "R2"
 bucket_name = "share"
 
-[[workflows]]
-binding = "AI_WORKFLOW"
-name = "ai-workflow"
-class_name = "AIWorkflow"
+[[queues.producers]]
+binding = "MESSAGE_QUEUE"
+queue = "tux-robot-messages"
 
-[env.dev]
-name = "tux-robot-dev"
-
-[env.dev.ai]
-binding = "AI"
-
-[[env.dev.kv_namespaces]]
-binding = "CONVERSATION_HISTORY"
-id = "7c147881ce7d42b8811bfbf8c38e3ee4"
-
-[[env.dev.r2_buckets]]
-binding = "R2"
-bucket_name = "share"
-
-[[env.dev.workflows]]
-binding = "AI_WORKFLOW"
-name = "ai-workflow-dev"
-class_name = "AIWorkflow"
+[[queues.consumers]]
+queue = "tux-robot-messages"
+max_batch_size = 10
+max_batch_timeout = 5

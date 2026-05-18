@@ -1,5 +1,4 @@
 import { Bot, Context, webhookCallback } from 'grammy';
-import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import { HistoryManager, getBalance } from './lib/history_manager.js';
 import { markdownToHtml, fetchTool, wikipediaTool, createTavilySearchTool } from './lib/utils.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
@@ -9,7 +8,7 @@ export interface Environment {
 	AI: Ai;
 	R2: R2Bucket;
 	CONVERSATION_HISTORY: KVNamespace;
-	AI_WORKFLOW: Workflow;
+	MESSAGE_QUEUE: Queue<Task>;
 	TAVILY_API_KEY: string;
 }
 
@@ -211,7 +210,7 @@ async function chargeStars(
 		}
 
 		ctx.executionCtx.waitUntil(
-			ctx.env.AI_WORKFLOW.create({ params: task }).catch(console.error)
+			ctx.env.MESSAGE_QUEUE.send(task).catch(console.error)
 		);
 	} else {
 		if (ctx.update.business_message || ctx.update.guest_message) {
@@ -481,7 +480,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			return;
 		}
 		task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
-		ctx.executionCtx.waitUntil(ctx.env.AI_WORKFLOW.create({ params: task }).catch(console.error));
+		ctx.executionCtx.waitUntil(ctx.env.MESSAGE_QUEUE.send(task).catch(console.error));
 		await ctx.env.CONVERSATION_HISTORY.delete(`task:${taskId}`);
 	});
 
@@ -691,60 +690,17 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 }
 
-export class AIWorkflow extends WorkflowEntrypoint<Environment, any> {
-	async run(event: WorkflowEvent<any>, step: WorkflowStep): Promise<void> {
-		const task = event.payload;
-		console.log('[Workflow] Starting run for task type:', task.type);
-		console.log('[Workflow] Task Details:', JSON.stringify(task));
-		const env = this.env;
-
-		const config = await step.do('Initialize Context', async () => {
-			const messages = [
-				{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
-				...(task.history || []),
-				{ role: 'user', content: task.prompt },
-			];
-			const modelId = task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8';
-			return { messages, modelId };
-		});
-
-		let stepResult: { content: string; toolExecutions?: any[] };
-
-		try {
-			stepResult = await step.do('Stream AI Response', async () => {
-				const toolExecutions: any[] = [];
-
-				const wrapTool = (originalTool: any) => {
-					return {
-						...originalTool,
-						function: async (args: any) => {
-							try {
-								const result = await originalTool.function(args);
-								const resultStr = String(result);
-								toolExecutions.push({
-									tool: originalTool.name,
-									arguments: args,
-									status: 'success',
-									output: resultStr.length > 1000 ? resultStr.slice(0, 1000) + '... (truncated)' : resultStr,
-								});
-								return result;
-							} catch (error) {
-								toolExecutions.push({
-									tool: originalTool.name,
-									arguments: args,
-									status: 'error',
-									error: String(error),
-								});
-								throw error;
-							}
-						},
-					};
-				};
-
-				const wrappedFetch = wrapTool(fetchTool);
-				const wrappedWikipedia = wrapTool(wikipediaTool);
-				const tavilyTool = createTavilySearchTool(env.TAVILY_API_KEY);
-				const wrappedTavily = wrapTool(tavilyTool);
+export default {
+	async queue(batch: MessageBatch<Task>, env: Environment): Promise<void> {
+		for (const message of batch.messages) {
+			const task = message.body;
+			try {
+				const messages = [
+					{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
+					...(task.history || []),
+					{ role: 'user', content: task.prompt },
+				];
+				const modelId = task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8';
 
 				const botInstance = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN);
 
@@ -752,35 +708,26 @@ export class AIWorkflow extends WorkflowEntrypoint<Environment, any> {
 					{
 						env,
 						api: botInstance.api,
-						reply: (text: string, options: any) => botInstance.api.sendMessage(task.chatId, text, options),
+						// eslint-disable-next-line @typescript-eslint/no-explicit-any
+						reply: (text: string, options: any) => botInstance.api.sendMessage(task.chatId!, text, options),
 					},
 					env.AI,
-					config.modelId,
-					config.messages,
+					modelId,
+					messages,
 					task,
-					[wrappedFetch, wrappedWikipedia, wrappedTavily],
+					[fetchTool, wikipediaTool, createTavilySearchTool(env.TAVILY_API_KEY)],
 				);
 
-				return {
-					content: responseContent,
-					toolExecutions: toolExecutions.length > 0 ? toolExecutions : undefined,
-				};
-			});
-		} catch (e) {
-			console.error('[Workflow] Error during streaming step execution:', e);
-			throw e;
+				if (task.userId && responseContent) {
+					const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
+					await historyManager.addMessage(task.userId, task.prompt, responseContent, task.threadId);
+				}
+			} catch (e) {
+				console.error('[Queue] Error processing message:', e);
+				message.retry();
+			}
 		}
-
-		if (task.userId && stepResult.content) {
-			await step.do('Save Conversation History', async () => {
-				const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
-				await historyManager.addMessage(task.userId, task.prompt, stepResult.content, task.threadId);
-			});
-		}
-	}
-}
-
-export default {
+	},
 	async fetch(request: Request, env: Environment, executionCtx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const xSource = request.headers.get('x-source');
