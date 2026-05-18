@@ -23,8 +23,17 @@ queue = "tux-robot-messages"
 max_batch_size = 10
 max_batch_timeout = 5
 
-[sandbox]
-binding = "Sandbox"
+[[containers]]
+class_name = "Sandbox"
+image = "./Dockerfile"
+
+[[durable_objects.bindings]]
+class_name = "Sandbox"
+name = "Sandbox"
+
+[[migrations]]
+new_sqlite_classes = ["Sandbox"]
+tag = "v1"
 
 [env.dev]
 name = "tux-robot-dev"
@@ -49,8 +58,13 @@ queue = "tux-robot-messages-dev"
 max_batch_size = 10
 max_batch_timeout = 5
 
-[env.dev.sandbox]
-binding = "Sandbox"
+[[env.dev.containers]]
+class_name = "Sandbox"
+image = "./Dockerfile"
+
+[[env.dev.durable_objects.bindings]]
+class_name = "Sandbox"
+name = "Sandbox"
 
 [env.production]
 name = "tux-robot"
@@ -75,5 +89,10 @@ queue = "tux-robot-messages"
 max_batch_size = 10
 max_batch_timeout = 5
 
-[env.production.sandbox]
-binding = "Sandbox"
+[[env.production.containers]]
+class_name = "Sandbox"
+image = "./Dockerfile"
+
+[[env.production.durable_objects.bindings]]
+class_name = "Sandbox"
+name = "Sandbox"
