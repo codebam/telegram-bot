@@ -45,3 +45,26 @@ queue = "tux-robot-messages-dev"
 queue = "tux-robot-messages-dev"
 max_batch_size = 10
 max_batch_timeout = 5
+
+[env.production]
+name = "tux-robot"
+
+[env.production.ai]
+binding = "AI"
+
+[[env.production.kv_namespaces]]
+binding = "CONVERSATION_HISTORY"
+id = "7c147881ce7d42b8811bfbf8c38e3ee4"
+
+[[env.production.r2_buckets]]
+binding = "R2"
+bucket_name = "share"
+
+[[env.production.queues.producers]]
+binding = "MESSAGE_QUEUE"
+queue = "tux-robot-messages"
+
+[[env.production.queues.consumers]]
+queue = "tux-robot-messages"
+max_batch_size = 10
+max_batch_timeout = 5
