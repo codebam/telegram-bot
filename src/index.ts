@@ -192,7 +192,10 @@ async function chatConversation(conversation: MyConversation, ctx: MyContext) {
 	}
 
 	// Initialize history from KV if it exists, otherwise start fresh
-	const history = (await conversation.external(() => new HistoryManager(ctx.env.CONVERSATION_HISTORY).getHistory(userId, threadId))) || [];
+	const history = (await conversation.external(async () => {
+		const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
+		return await historyManager.getHistory(userId, threadId);
+	})) || [];
 
 	while (true) {
 		let prompt = ctx.message?.text || ctx.message?.caption || '';
@@ -208,10 +211,12 @@ async function chatConversation(conversation: MyConversation, ctx: MyContext) {
 		if (prompt) {
 			// Logic from chargeStars but integrated into the conversation
 			const billingUserId = ctx.from?.id;
-			const balance = await conversation.external(() => getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY));
-			const modelPreference =
-				(await conversation.external(() => ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`))) ??
-				'gemma4';
+			const { balance, modelPreference } = await conversation.external(async () => {
+				const b = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
+				const mp = (await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'gemma4';
+				return { balance: b, modelPreference: mp };
+			});
+
 			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS.gemma4;
 			const amount = modelConfig.cost;
 
