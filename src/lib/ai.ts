@@ -70,7 +70,7 @@ export async function customRunWithTools(
 						const parts: any[] = [];
 						
 						if (m.role === 'tool') {
-							role = 'function';
+							role = 'user'; // Cloudflare Gemini only supports 'user' and 'model'
 							parts.push({
 								functionResponse: {
 									name: m.name,
