@@ -238,6 +238,60 @@ export async function sendMessageDraft(token: string, data: any) {
 }
 
 /**
+ * Async generator that yields AI response chunks.
+ */
+export async function* getAiStream(
+	ai: any,
+	modelId: string,
+	messages: any[],
+	tools: Tool[] = []
+): AsyncGenerator<string> {
+	const aiResponse = await customRunWithTools(
+		ai,
+		modelId,
+		{
+			messages,
+			tools,
+		},
+		{ streamFinalResponse: true },
+	);
+
+	if (typeof aiResponse === 'object' && aiResponse !== null && 'getReader' in aiResponse) {
+		const stream = aiResponse as ReadableStream;
+		const reader = stream.getReader();
+		const decoder = new TextDecoder();
+
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
+
+			const chunk = decoder.decode(value, { stream: true });
+			const lines = chunk.split('\n');
+
+			for (const line of lines) {
+				if (line.startsWith('data: ')) {
+					const data = line.slice(6);
+					if (data === '[DONE]') {
+						break;
+					}
+					try {
+						const parsed = JSON.parse(data);
+						const text = extractText(parsed);
+						if (text) yield text;
+					} catch {
+						// Ignore malformed JSON chunks
+					}
+				}
+			}
+		}
+	} else {
+		yield extractText(aiResponse);
+	}
+}
+
+/**
  * Stream AI response to Telegram, with periodic updates to avoid rate limits.
  */
 export async function streamAiResponseToTelegram(
@@ -263,113 +317,110 @@ export async function streamAiResponseToTelegram(
 	}
 
 	let streamContent = '';
-	let lastUpdate = Date.now();
 
-	try {
-		const aiResponse = await customRunWithTools(
-			ai,
-			modelId,
-			{
-				messages,
-				tools,
-			},
-			{ streamFinalResponse: true },
-		);
+	if (ctx.replyWithStream && task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
+		// Use the grammy stream plugin if available on context
+		const iterator = getAiStream(ai, modelId, messages, tools);
+		let lastDraftUpdate = Date.now();
 
-		if (typeof aiResponse === 'object' && aiResponse !== null && 'getReader' in aiResponse) {
-			const stream = aiResponse as ReadableStream;
-			const reader = stream.getReader();
-			const decoder = new TextDecoder();
+		async function* streamWithMetadata() {
+			for await (const chunk of iterator) {
+				streamContent += chunk;
+				yield chunk;
 
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) {
-					break;
-				}
-
-				const chunk = decoder.decode(value, { stream: true });
-				const lines = chunk.split('\n');
-
-				for (const line of lines) {
-					if (line.startsWith('data: ')) {
-						const data = line.slice(6);
-						if (data === '[DONE]') {
-							break;
-						}
-						try {
-							const parsed = JSON.parse(data);
-							const text = extractText(parsed);
-							streamContent += text;
-						} catch {
-							// Ignore malformed JSON chunks
-						}
-					}
-				}
-
-				if (
-					task.updateType !== 'guest_message' &&
-					task.updateType !== 'business_message' &&
-					Date.now() - lastUpdate > 2000 &&
-					streamContent.trim()
-				) {
-					const currentContent = streamContent;
+				if (Date.now() - lastDraftUpdate > 2000) {
 					await sendMessageDraft(token, {
 						chat_id: task.chatId,
-						text: await markdownToHtml(currentContent + '...'),
+						text: await markdownToHtml(streamContent + '...'),
 						parse_mode: 'HTML',
 						message_thread_id: task.threadId,
 						business_connection_id: task.businessConnectionId,
 						draft_id: draftId,
 					});
-					lastUpdate = Date.now();
+					lastDraftUpdate = Date.now();
 				}
 			}
-		} else {
-			streamContent = extractText(aiResponse);
 		}
-	} catch (e) {
-		console.error('Error reading AI stream:', e);
-	}
+		await ctx.replyWithStream(streamWithMetadata(), {
+			parse_mode: 'HTML',
+			message_thread_id: task.threadId,
+			business_connection_id: task.businessConnectionId,
+			reply_to_message_id: task.messageId,
+		});
 
-	if (streamContent.trim()) {
-		if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
-			await sendMessageDraft(token, {
-				chat_id: task.chatId,
-				text: await markdownToHtml(streamContent),
-				parse_mode: 'HTML',
-				message_thread_id: task.threadId,
-				business_connection_id: task.businessConnectionId,
-				draft_id: draftId,
-				finish: true,
-			});
-			await ctx.api
-				.sendMessage(task.chatId, await markdownToHtml(streamContent), {
+		await sendMessageDraft(token, {
+			chat_id: task.chatId,
+			text: await markdownToHtml(streamContent),
+			parse_mode: 'HTML',
+			message_thread_id: task.threadId,
+			business_connection_id: task.businessConnectionId,
+			draft_id: draftId,
+			finish: true,
+		});
+	} else {
+		// Fallback for when context is not a full Grammy context (e.g. in queue)
+		// or for special message types
+		const lastUpdate = { time: Date.now() };
+		for await (const chunk of getAiStream(ai, modelId, messages, tools)) {
+			streamContent += chunk;
+			if (
+				task.updateType !== 'guest_message' &&
+				task.updateType !== 'business_message' &&
+				Date.now() - lastUpdate.time > 2000 &&
+				streamContent.trim()
+			) {
+				await sendMessageDraft(token, {
+					chat_id: task.chatId,
+					text: await markdownToHtml(streamContent + '...'),
 					parse_mode: 'HTML',
 					message_thread_id: task.threadId,
 					business_connection_id: task.businessConnectionId,
-					reply_to_message_id: task.messageId,
-				})
-				.catch((e: Error) => console.error('Error sending final reply:', e));
-		} else if (task.updateType === 'guest_message' && task.guestQueryId) {
-			try {
-				await ctx.api.answerGuestQuery(task.guestQueryId, {
-					type: 'article',
-					id: crypto.randomUUID(),
-					title: 'AI Response',
-					input_message_content: {
-						message_text: await markdownToHtml(streamContent),
-						parse_mode: 'HTML',
-					},
+					draft_id: draftId,
 				});
-			} catch (e) {
-				console.error('[streamAiResponseToTelegram] Failed to answer guest query:', e);
+				lastUpdate.time = Date.now();
 			}
-		} else {
-			await ctx.reply(await markdownToHtml(streamContent), {
-				parse_mode: 'HTML',
-				business_connection_id: task.businessConnectionId,
-				reply_to_message_id: task.messageId,
-			});
+		}
+
+		if (streamContent.trim()) {
+			if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
+				await sendMessageDraft(token, {
+					chat_id: task.chatId,
+					text: await markdownToHtml(streamContent),
+					parse_mode: 'HTML',
+					message_thread_id: task.threadId,
+					business_connection_id: task.businessConnectionId,
+					draft_id: draftId,
+					finish: true,
+				});
+				await ctx.api
+					.sendMessage(task.chatId, await markdownToHtml(streamContent), {
+						parse_mode: 'HTML',
+						message_thread_id: task.threadId,
+						business_connection_id: task.businessConnectionId,
+						reply_to_message_id: task.messageId,
+					})
+					.catch((e: Error) => console.error('Error sending final reply:', e));
+			} else if (task.updateType === 'guest_message' && task.guestQueryId) {
+				try {
+					await ctx.api.answerGuestQuery(task.guestQueryId, {
+						type: 'article',
+						id: crypto.randomUUID(),
+						title: 'AI Response',
+						input_message_content: {
+							message_text: await markdownToHtml(streamContent),
+							parse_mode: 'HTML',
+						},
+					});
+				} catch (e) {
+					console.error('[streamAiResponseToTelegram] Failed to answer guest query:', e);
+				}
+			} else {
+				await ctx.reply(await markdownToHtml(streamContent), {
+					parse_mode: 'HTML',
+					business_connection_id: task.businessConnectionId,
+					reply_to_message_id: task.messageId,
+				});
+			}
 		}
 	}
 	return streamContent;

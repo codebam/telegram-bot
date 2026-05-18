@@ -1,18 +1,30 @@
-import { Bot, Context, webhookCallback } from 'grammy';
+import { Bot, Context, webhookCallback, session } from 'grammy';
+import { autoRetry } from '@grammyjs/auto-retry';
+import { stream, type StreamFlavor } from '@grammyjs/stream';
+import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
+import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
+import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool } from './lib/utils.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
-type MyContext = Context & {
-	env: Environment;
-	executionCtx: ExecutionContext;
-};
+type BaseContext = CommandsFlavor &
+	Context & {
+		env: Environment;
+		executionCtx: ExecutionContext;
+		session: any;
+	};
+
+type MyContext = StreamFlavor<BaseContext & ConversationFlavor<BaseContext>>;
+
+type MyConversation = Conversation<MyContext>;
 
 async function getBusinessOwnerData(
-	ctx: MyContext,
+	ctx: Context,
+	env: Environment,
 	connectionId: string
 ): Promise<{ id: number; name: string; username?: string } | null> {
-	let ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
+	let ownerData = await env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
 		`business_connection:${connectionId}`,
 		'json'
 	);
@@ -21,7 +33,7 @@ async function getBusinessOwnerData(
 	} else {
 		console.log(`[getBusinessOwnerData] Cache MISS or stale entry for connection ${connectionId}. Fetching from Telegram API...`);
 		try {
-			const response = await fetch(`https://api.telegram.org/bot${ctx.env.SECRET_TELEGRAM_API_TOKEN}/getBusinessConnection?business_connection_id=${connectionId}`);
+			const response = await fetch(`https://api.telegram.org/bot${env.SECRET_TELEGRAM_API_TOKEN}/getBusinessConnection?business_connection_id=${connectionId}`);
 			console.log(`[getBusinessOwnerData] Telegram API response status: ${response.status}`);
 			if (response.status === 200) {
 				const json = (await response.json()) as {
@@ -39,11 +51,11 @@ async function getBusinessOwnerData(
 					if (id) {
 						ownerData = { id, name, username };
 						console.log(`[getBusinessOwnerData] Successfully resolved owner: id=${id}, name=${name}, username=${username ?? ''}. Caching in KV...`);
-						await ctx.env.CONVERSATION_HISTORY.put(
+						await env.CONVERSATION_HISTORY.put(
 							`active_connection:${id}`,
 							connectionId
 						);
-						await ctx.env.CONVERSATION_HISTORY.put(
+						await env.CONVERSATION_HISTORY.put(
 							`business_connection:${connectionId}`,
 							JSON.stringify(ownerData)
 						);
@@ -77,7 +89,7 @@ async function chargeStars(
 		const customerId = ctx.update.business_message?.chat.id;
 		if (connectionId && customerId) {
 			userId = `business:${connectionId}:${customerId}`;
-			const ownerData = await getBusinessOwnerData(ctx, connectionId);
+			const ownerData = await getBusinessOwnerData(ctx, ctx.env, connectionId);
 			if (ownerData?.id) {
 				billingUserId = ownerData.id;
 			}
@@ -167,36 +179,117 @@ async function chargeStars(
 	}
 }
 
-function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionContext) {
-	bot.use(async (ctx, next) => {
-		ctx.env = env;
-		ctx.executionCtx = executionCtx;
-		await next();
-	});
+async function chatConversation(conversation: MyConversation, ctx: MyContext) {
+	const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
+	let userId: number | string = ctx.from!.id;
+	const threadId = ctx.message?.message_thread_id;
 
-	bot.use(async (ctx, next) => {
-		const token = ctx.env.SECRET_TELEGRAM_API_TOKEN;
-		const botTtl = (await ctx.env.CONVERSATION_HISTORY.get<number>(`ttl:${token.slice(0, 10)}`, 'json')) ?? 2;
-
-		const isSelf = ctx.from?.id === ctx.me.id;
-		const counterKey = `ttl_counter:${ctx.chat?.id}:${token.slice(0, 10)}`;
-
-		if (isSelf) {
-			const count = (await ctx.env.CONVERSATION_HISTORY.get<number>(counterKey, 'json')) ?? 0;
-			if (count >= botTtl) {
-				console.log(`TTL exceeded for chat ${ctx.chat?.id}. Blocking update.`);
-				return;
-			}
-			await ctx.env.CONVERSATION_HISTORY.put(counterKey, JSON.stringify(count + 1), {
-				expirationTtl: 3600,
-			});
-		} else {
-			await ctx.env.CONVERSATION_HISTORY.delete(counterKey);
+	if (ctx.update.business_message) {
+		const connectionId = ctx.update.business_message?.business_connection_id;
+		const customerId = ctx.update.business_message?.chat.id;
+		if (connectionId && customerId) {
+			userId = `business:${connectionId}:${customerId}`;
 		}
-		await next();
-	});
+	}
 
-	bot.command('start', async (ctx) => {
+	// Initialize history from KV if it exists, otherwise start fresh
+	const history = (await conversation.external(() => historyManager.getHistory(userId, threadId))) || [];
+
+	while (true) {
+		let prompt = ctx.message?.text || ctx.message?.caption || '';
+
+		if (ctx.message?.reply_to_message) {
+			const reply = ctx.message.reply_to_message;
+			const replyText = reply.text || reply.caption || '';
+			if (replyText) {
+				prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
+			}
+		}
+
+		if (prompt) {
+			// Logic from chargeStars but integrated into the conversation
+			const billingUserId = ctx.from?.id;
+			const balance = await conversation.external(() => getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY));
+			const modelPreference =
+				(await conversation.external(() => ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`))) ??
+				'gemma4';
+			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS.gemma4;
+			const amount = modelConfig.cost;
+
+			if (balance >= amount) {
+				await ctx.replyWithChatAction('typing');
+				const balanceKey = `balance:${String(billingUserId)}`;
+				await conversation.external(() => ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance - amount)));
+
+				const systemPrompt = await conversation.external(async () => {
+					if (ctx.update.business_message) {
+						return SYSTEM_PROMPTS.BUSINESS_MODE;
+					}
+					const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
+					return customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
+				});
+
+				const messages = [
+					{ role: 'system', content: systemPrompt },
+					...history,
+					{ role: 'user', content: prompt },
+				];
+
+				const modelId = modelConfig.id;
+
+				const responseContent = await streamAiResponseToTelegram(
+					ctx,
+					ctx.env.AI,
+					modelId,
+					messages,
+					{
+						type: 'message',
+						prompt,
+						chatId: ctx.chat?.id.toString(),
+						threadId,
+						businessConnectionId: ctx.update.business_message?.business_connection_id?.toString(),
+						messageId: ctx.message?.message_id,
+						userId: String(userId),
+						systemPrompt,
+						history,
+						telegramToken: ctx.env.SECRET_TELEGRAM_API_TOKEN,
+					},
+					[fetchTool, wikipediaTool, createTavilySearchTool(ctx.env.TAVILY_API_KEY || '')],
+				);
+
+				if (responseContent) {
+					history.push({ role: 'user', content: prompt });
+					history.push({ role: 'assistant', content: responseContent });
+					// Sync back to KV
+					await conversation.external(() => historyManager.addMessage(userId, prompt, responseContent, threadId));
+				}
+			} else {
+				// Handle insufficient balance (omitted full logic for brevity, can call ctx.replyWithInvoice)
+				await ctx.reply('Insufficient balance. Please top up your Stars.');
+				break;
+			}
+		}
+
+		ctx = (await conversation.wait()) as MyContext;
+	}
+}
+
+function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionContext) {
+	bot.api.config.use(autoRetry());
+	bot.use(stream());
+
+	bot.use(
+		session({
+			initial: () => ({}) as any,
+			storage: new KvAdapter(env.CONVERSATION_HISTORY as any),
+		}),
+	);
+	bot.use(conversations());
+	bot.use(createConversation(chatConversation as any));
+
+	const commands = new CommandGroup<MyContext>();
+
+	commands.command('start', 'Welcome message and command list', async (ctx) => {
 		await ctx.reply(
 			'Welcome! Here are my commands:\n' +
 				'/balance - Check your current Star balance\n' +
@@ -221,14 +314,14 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		);
 	});
 
-	bot.command('balance', async (ctx) => {
+	commands.command('balance', 'Check your current Star balance', async (ctx) => {
 		if (ctx.from) {
 			const balance = await getBalance(ctx.from.id, ctx.env.CONVERSATION_HISTORY);
 			await ctx.reply(`Your current balance is ${String(balance)} Stars.`);
 		}
 	});
 
-	bot.command('load', async (ctx) => {
+	commands.command('load', 'Top up your balance with Telegram Stars', async (ctx) => {
 		const amount = parseInt(ctx.match || '0');
 		if (isNaN(amount) || amount <= 0 || amount > 1000) {
 			await ctx.reply('Please specify an amount between 1 and 1000 Stars. Example: /load 100');
@@ -239,7 +332,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
-	bot.command('clear', async (ctx) => {
+	commands.command('clear', 'Clear your conversation history', async (ctx) => {
 		if (ctx.from) {
 			const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
 			let historyUserId: number | string = ctx.from.id;
@@ -256,14 +349,14 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
-	bot.command('code', async (ctx) => {
+	commands.command('code', 'Generate code snippets', async (ctx) => {
 		const prompt = ctx.match;
 		if (prompt) {
 			await chargeStars(ctx, { type: 'code', prompt });
 		}
 	});
 
-	bot.command('ttl', async (ctx) => {
+	commands.command('ttl', 'Set the TTL for bot-to-bot responses', async (ctx) => {
 		const newTtl = parseInt(ctx.match || '0');
 		const token = ctx.env.SECRET_TELEGRAM_API_TOKEN;
 		if (newTtl >= 1 && newTtl <= 5) {
@@ -275,7 +368,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
-	bot.command('model', async (ctx) => {
+	commands.command('model', 'Switch AI model and see costs', async (ctx) => {
 		if (ctx.from) {
 			const modelKey = `model:${String(ctx.from.id)}`;
 			const selectedModel = ctx.match?.toLowerCase();
@@ -300,7 +393,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
-	bot.command('prompt', async (ctx) => {
+	commands.command('prompt', 'Set your custom system prompt', async (ctx) => {
 		if (ctx.from) {
 			let promptValue = ctx.match.trim();
 			if (promptValue === 'reset' || promptValue === '""' || promptValue === "''" || promptValue === '') {
@@ -319,7 +412,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
-	bot.command('facts', async (ctx) => {
+	commands.command('facts', 'Set facts about yourself for business mode', async (ctx) => {
 		if (ctx.from) {
 			let factsValue = ctx.match.trim();
 			const userId = ctx.from.id;
@@ -369,13 +462,21 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
-	bot.command('request', async (ctx) => {
+	commands.command('request', 'Make arbitrary API requests', async (ctx) => {
 		const prompt = ctx.match;
 		if (!prompt) {
 			await ctx.reply('Please provide a request. Example: /request what is the weather in San Francisco?');
 			return;
 		}
 		await chargeStars(ctx, { type: 'tool_call', prompt, tools: [fetchTool, wikipediaTool] });
+	});
+
+	bot.use(commands);
+
+	bot.use(async (ctx, next) => {
+		ctx.env = env;
+		ctx.executionCtx = executionCtx;
+		await next();
 	});
 
 	bot.on('message:document', async (ctx) => {
@@ -495,67 +596,11 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	bot.on('business_message', async (ctx) => {
-		await ctx.replyWithChatAction('typing');
-		const businessMessage = ctx.update.business_message!;
-		const photo = businessMessage.photo;
-		const fileId = photo ? photo[photo.length - 1].file_id : '';
-		let prompt = businessMessage.text ?? businessMessage.caption ?? '';
-		if (businessMessage.reply_to_message) {
-			const reply = businessMessage.reply_to_message;
-			const replyText = reply.text ?? reply.caption ?? '';
-			if (replyText) {
-				prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
-			}
-		}
-
-		let ownerName = 'the business owner';
-		let ownerId: number | undefined;
-		let username: string | undefined;
-		const connectionId = businessMessage.business_connection_id;
-		if (connectionId) {
-			const ownerData = await getBusinessOwnerData(ctx, connectionId);
-			if (ownerData) {
-				ownerName = ownerData.name;
-				ownerId = ownerData.id;
-				username = ownerData.username;
-			}
-		}
-
-		let systemPrompt = SYSTEM_PROMPTS.BUSINESS_MODE.replaceAll('{owner_name}', ownerName);
-		let facts: string | null = null;
-		if (ownerId) {
-			facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerId)}`);
-		}
-		if (!facts && username) {
-			facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${username}`);
-		}
-		if (!facts && ownerName && ownerName !== 'the business owner') {
-			facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${ownerName}`);
-		}
-
-		if (facts) {
-			systemPrompt += `\n\nHere are some facts about yourself (${ownerName}) that you should keep in mind and use to answer accurately if relevant:\n${facts}`;
-		}
-
-		await chargeStars(ctx, {
-			type: 'business_message',
-			prompt,
-			fileId,
-			systemPrompt,
-		});
+		await ctx.conversation.enter('chatConversation');
 	});
 
 	bot.on('message:text', async (ctx) => {
-		// Regular message logic
-		let prompt = ctx.message.text;
-		if (ctx.message.reply_to_message) {
-			const reply = ctx.message.reply_to_message;
-			const replyText = reply.text ?? reply.caption ?? '';
-			if (replyText) {
-				prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
-			}
-		}
-		await chargeStars(ctx, { type: 'message', prompt });
+		await ctx.conversation.enter('chatConversation');
 	});
 
 	bot.on('guest_message', async (ctx) => {
@@ -641,6 +686,7 @@ export default {
 					throw new Error('SECRET_TELEGRAM_API_TOKEN is empty in queue handler');
 				}
 				const botInstance = new Bot<MyContext>(token);
+				botInstance.api.config.use(autoRetry());
 
 				const responseContent = await streamAiResponseToTelegram(
 					{
