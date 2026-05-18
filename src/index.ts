@@ -8,6 +8,8 @@ import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_M
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
+export { Sandbox } from '@cloudflare/sandbox';
+
 type BaseContext = CommandsFlavor &
 	Context & {
 		env: Environment;
