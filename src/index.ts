@@ -610,41 +610,40 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	bot.on('message:text', async (ctx) => {
-		// Guest message logic
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const guestMessage = (ctx.update as any).guest_message;
-		if (guestMessage) {
-			let prompt = guestMessage.text?.toString() ?? '';
-			const token = ctx.env.SECRET_TELEGRAM_API_TOKEN;
-			let botUsername = await ctx.env.CONVERSATION_HISTORY.get(`bot_username:${token.slice(0, 10)}`);
-			if (!botUsername) {
-				const me = await ctx.api.getMe();
-				botUsername = me.username;
-				await ctx.env.CONVERSATION_HISTORY.put(`bot_username:${token.slice(0, 10)}`, botUsername, {
-					expirationTtl: 86400,
-				});
-			}
-			const isMentioned = guestMessage.entities?.some(
-				(e: { type: string; offset: number; length: number }) =>
-					e.type === 'mention' && prompt.substring(e.offset, e.offset + e.length).toLowerCase() === `@${botUsername?.toLowerCase()}`,
-			);
-			if (!isMentioned) return;
-
-			if (guestMessage.reply_to_message) {
-				const reply = guestMessage.reply_to_message;
-				const replyText = reply.text ?? reply.caption ?? '';
-				if (replyText) {
-					prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
-				}
-			}
-			await chargeStars(ctx, { type: 'message', prompt });
-			return;
-		}
-
 		// Regular message logic
 		let prompt = ctx.message.text;
 		if (ctx.message.reply_to_message) {
 			const reply = ctx.message.reply_to_message;
+			const replyText = reply.text ?? reply.caption ?? '';
+			if (replyText) {
+				prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
+			}
+		}
+		await chargeStars(ctx, { type: 'message', prompt });
+	});
+
+	// @ts-ignore
+	bot.on('guest_message', async (ctx) => {
+		// @ts-ignore
+		const guestMessage = ctx.update.guest_message;
+		let prompt = guestMessage.text?.toString() ?? '';
+		const token = ctx.env.SECRET_TELEGRAM_API_TOKEN;
+		let botUsername = await ctx.env.CONVERSATION_HISTORY.get(`bot_username:${token.slice(0, 10)}`);
+		if (!botUsername) {
+			const me = await ctx.api.getMe();
+			botUsername = me.username;
+			await ctx.env.CONVERSATION_HISTORY.put(`bot_username:${token.slice(0, 10)}`, botUsername, {
+				expirationTtl: 86400,
+			});
+		}
+		const isMentioned = guestMessage.entities?.some(
+			(e: { type: string; offset: number; length: number }) =>
+				e.type === 'mention' && prompt.substring(e.offset, e.offset + e.length).toLowerCase() === `@${botUsername?.toLowerCase()}`,
+		);
+		if (!isMentioned) return;
+
+		if (guestMessage.reply_to_message) {
+			const reply = guestMessage.reply_to_message;
 			const replyText = reply.text ?? reply.caption ?? '';
 			if (replyText) {
 				prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
