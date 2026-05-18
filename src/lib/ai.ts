@@ -70,7 +70,7 @@ export async function customRunWithTools(
 						const parts: any[] = [];
 						
 						if (m.role === 'tool') {
-							role = 'function'; // Try 'function' first as it was in my previous structured attempt
+							role = 'model'; // Try 'model' as role for function results
 							parts.push({
 								functionResponse: {
 									name: m.name,
@@ -99,7 +99,13 @@ export async function customRunWithTools(
 						}
 						return { role, parts };
 					}),
-					tools: cfTools.length > 0 ? cfTools : undefined,
+					// Cloudflare Gemini expects a flat array of function declarations directly in 'tools'
+					tools: cfTools.length > 0 ? cfTools.map(t => t.function) : undefined,
+					toolConfig: cfTools.length > 0 ? {
+						functionCallingConfig: {
+							mode: 'AUTO'
+						}
+					} : undefined,
 					stream
 				};
 				if (systemMessage) {
@@ -107,7 +113,7 @@ export async function customRunWithTools(
 						parts: [{ text: systemMessage.content as string }]
 					};
 				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.18 (standard tools) with input:', JSON.stringify(geminiInput));
+				console.log('[customRunWithTools] Calling ai.run (Gemini) v1.2.19 (flat tools) with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
