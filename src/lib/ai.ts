@@ -71,6 +71,7 @@ export async function customRunWithTools(
 						if (m.content) parts.push({ text: m.content });
 						return { role, parts };
 					}),
+					tools: cfTools.length > 0 ? [{ function_declarations: cfTools.map(t => t.function) }] : undefined,
 					stream
 				};
 				if (systemMessage) {
@@ -78,7 +79,7 @@ export async function customRunWithTools(
 						parts: [{ text: systemMessage.content as string }]
 					};
 				}
-				console.log('[customRunWithTools] Calling ai.run (Gemini) DEBUG (system only) with input:', JSON.stringify(geminiInput));
+				console.log('[customRunWithTools] Calling ai.run (Gemini) DEBUG (tools) with input:', JSON.stringify(geminiInput));
 				const res = await ai.run(model, geminiInput);
 				console.log('[customRunWithTools] ai.run (Gemini) call returned.');
 				return res;
