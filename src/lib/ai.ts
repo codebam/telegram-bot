@@ -305,6 +305,8 @@ export async function streamAiResponseToTelegram(
 	const token = task.telegramToken || task.token || ctx.env.SECRET_TELEGRAM_API_TOKEN;
 	const draftId = task.updateId || Date.now();
 
+	console.log(`[streamAiResponseToTelegram] Starting for task: ${task.type}, updateType: ${task.updateType}, model: ${modelId}`);
+
 	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
 		await sendMessageDraft(token, {
 			chat_id: task.chatId,
@@ -319,6 +321,7 @@ export async function streamAiResponseToTelegram(
 	let streamContent = '';
 
 	if (ctx.replyWithStream && task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
+		console.log('[streamAiResponseToTelegram] Using ctx.replyWithStream');
 		// Use the grammy stream plugin if available on context
 		const iterator = getAiStream(ai, modelId, messages, tools);
 		let lastDraftUpdate = Date.now();
@@ -358,31 +361,37 @@ export async function streamAiResponseToTelegram(
 			finish: true,
 		});
 	} else {
-		// Fallback for when context is not a full Grammy context (e.g. in queue)
-		// or for special message types
+		console.log('[streamAiResponseToTelegram] Using getAiStream fallback');
 		const lastUpdate = { time: Date.now() };
-		for await (const chunk of getAiStream(ai, modelId, messages, tools)) {
-			streamContent += chunk;
-			if (
-				task.updateType !== 'guest_message' &&
-				task.updateType !== 'business_message' &&
-				Date.now() - lastUpdate.time > 2000 &&
-				streamContent.trim()
-			) {
-				await sendMessageDraft(token, {
-					chat_id: task.chatId,
-					text: await markdownToHtml(streamContent + '...'),
-					parse_mode: 'HTML',
-					message_thread_id: task.threadId,
-					business_connection_id: task.businessConnectionId,
-					draft_id: draftId,
-				});
-				lastUpdate.time = Date.now();
+		try {
+			for await (const chunk of getAiStream(ai, modelId, messages, tools)) {
+				streamContent += chunk;
+				if (
+					task.updateType !== 'guest_message' &&
+					task.updateType !== 'business_message' &&
+					Date.now() - lastUpdate.time > 2000 &&
+					streamContent.trim()
+				) {
+					await sendMessageDraft(token, {
+						chat_id: task.chatId,
+						text: await markdownToHtml(streamContent + '...'),
+						parse_mode: 'HTML',
+						message_thread_id: task.threadId,
+						business_connection_id: task.businessConnectionId,
+						draft_id: draftId,
+					});
+					lastUpdate.time = Date.now();
+				}
 			}
+		} catch (e) {
+			console.error('[streamAiResponseToTelegram] Error during AI streaming:', e);
 		}
+
+		console.log(`[streamAiResponseToTelegram] Stream finished. Content length: ${streamContent.length}`);
 
 		if (streamContent.trim()) {
 			if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
+				console.log('[streamAiResponseToTelegram] Sending final sendMessageDraft and sendMessage');
 				await sendMessageDraft(token, {
 					chat_id: task.chatId,
 					text: await markdownToHtml(streamContent),
@@ -415,16 +424,20 @@ export async function streamAiResponseToTelegram(
 					console.error('[streamAiResponseToTelegram] Failed to answer guest query:', e);
 				}
 			} else {
+				console.log(`[streamAiResponseToTelegram] Sending final reply to business/guest: ${task.chatId}`);
 				try {
-					await ctx.reply(await markdownToHtml(streamContent), {
+					const result = await ctx.reply(await markdownToHtml(streamContent), {
 						parse_mode: 'HTML',
 						business_connection_id: task.businessConnectionId,
 						reply_to_message_id: task.messageId,
 					});
+					console.log('[streamAiResponseToTelegram] Final business reply sent successfully:', JSON.stringify(result));
 				} catch (e) {
 					console.error('[streamAiResponseToTelegram] Failed to send final business reply:', e);
 				}
 			}
+		} else {
+			console.log('[streamAiResponseToTelegram] streamContent was empty, nothing to send.');
 		}
 	}
 	return streamContent;

@@ -233,10 +233,11 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 			if (prompt) {
 				// Logic from chargeStars but integrated into the conversation
 				let billingUserId = ctx.from?.id;
+				let ownerData: { id: number; name: string; username?: string } | null = null;
 				if (ctx.update.business_message) {
 					const connectionId = ctx.update.business_message?.business_connection_id;
 					if (connectionId) {
-						const ownerData = await conversation.external(() => getBusinessOwnerData(ctx, env, connectionId));
+						ownerData = await conversation.external(() => getBusinessOwnerData(ctx, env, connectionId));
 						if (ownerData?.id) {
 							billingUserId = ownerData.id;
 						}
@@ -265,16 +266,12 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 					const systemPrompt = await conversation.external(async () => {
 						if (ctx.update.business_message) {
-							const connectionId = ctx.update.business_message?.business_connection_id;
 							let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
-							if (connectionId) {
-								const ownerData = await getBusinessOwnerData(ctx, env, connectionId);
-								if (ownerData) {
-									prompt = prompt.replace(/{owner_name}/g, ownerData.name);
-									const facts = await env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
-									if (facts) {
-										prompt += `\n\nHere are some facts about you:\n${facts}`;
-									}
+							if (ownerData) {
+								prompt = prompt.replace(/{owner_name}/g, ownerData.name);
+								const facts = await env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
+								if (facts) {
+									prompt += `\n\nHere are some facts about you:\n${facts}`;
 								}
 							}
 							return prompt;
