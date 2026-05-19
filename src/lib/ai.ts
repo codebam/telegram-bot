@@ -511,12 +511,11 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							}
 
 							const text = extractText(parsed);
-							const keys = Object.keys(parsed).join(',');
 							const choice = parsed.choices?.[0];
 							const finishReason = choice?.finish_reason || parsed.candidates?.[0]?.finish_reason || '';
 							
-							if (chunkCount % 20 === 0 || finishReason) {
-								console.log(`[runStream] C:${chunkCount} L:${text.length} FR:${finishReason} K:${keys} hasT:${!!text} hasR:${!!reasoning}`);
+							if (chunkCount % 50 === 0 || finishReason) {
+								console.log(`[runStream] C:${chunkCount} L:${text.length} FR:${finishReason} hasT:${!!text} hasR:${!!reasoning}`);
 							}
 
 							if (text) {
@@ -544,7 +543,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							}
 
 							const text = extractText(parsed);
-							if (chunkCount % 20 === 0) {
+							if (chunkCount % 50 === 0) {
 								console.log(`[runStream] NC-C:${chunkCount} L:${text.length} hasT:${!!text}`);
 							}
 							if (text) {
@@ -664,7 +663,7 @@ export async function streamAiResponseToTelegram(
 			if (
 				task.updateType !== 'guest_message' &&
 				task.updateType !== 'business_message' &&
-				now - lastUpdate.time > 3000
+				now - lastUpdate.time > 5000
 			) {
 				const text = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
 					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''), true)
