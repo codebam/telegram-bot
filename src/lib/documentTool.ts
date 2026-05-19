@@ -1,6 +1,17 @@
 import { getDocumentProxy, extractText } from 'unpdf';
 import JSZip from 'jszip';
-import { AVAILABLE_MODELS, type ChatMessage } from '@codebam/shared';
+import { AVAILABLE_MODELS, type ChatMessage, type Environment } from '@codebam/shared';
+
+function chunkText(text: string, chunkSize = 1000, overlap = 200): string[] {
+	const chunks: string[] = [];
+	let i = 0;
+	while (i < text.length) {
+		const chunk = text.slice(i, i + chunkSize);
+		chunks.push(chunk);
+		i += chunkSize - overlap;
+	}
+	return chunks;
+}
 
 function extractPrintableStrings(buffer: ArrayBuffer): string {
 	const bytes = new Uint8Array(buffer);
@@ -32,7 +43,7 @@ function truncateFileContent(text: string, limit: number): string {
 }
 
 export async function parseTelegramFile(
-	telegramToken: string,
+	env: Environment,
 	_sandboxBinding: unknown, // keeping for signature compatibility
 	_userId: string, // keeping for signature compatibility
 	file_id: string,
@@ -44,7 +55,7 @@ export async function parseTelegramFile(
 	try {
 		console.log(`[parseTelegramFile] Native JS parsing triggered for FileID: ${file_id}, Name: ${file_name}, Limit: ${limit}`);
 		
-		const getFileUrl = `https://api.telegram.org/bot${telegramToken}/getFile?file_id=${file_id}`;
+		const getFileUrl = `https://api.telegram.org/bot${env.SECRET_TELEGRAM_API_TOKEN}/getFile?file_id=${file_id}`;
 		const getFileRes = await fetch(getFileUrl);
 		if (!getFileRes.ok) {
 			console.error(`[parseTelegramFile] Telegram getFile failed: ${getFileRes.status}`);
@@ -56,7 +67,7 @@ export async function parseTelegramFile(
 			return `Error: Failed to retrieve file path from Telegram API response.`;
 		}
 
-		const downloadUrl = `https://api.telegram.org/file/bot${telegramToken}/${getFileData.result.file_path}`;
+		const downloadUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${getFileData.result.file_path}`;
 		const downloadRes = await fetch(downloadUrl);
 		if (!downloadRes.ok) {
 			console.error(`[parseTelegramFile] Telegram file download failed: ${downloadRes.status}`);
@@ -66,35 +77,28 @@ export async function parseTelegramFile(
 		console.log(`[parseTelegramFile] File downloaded from Telegram. Size: ${arrayBuffer.byteLength} bytes`);
 
 		const ext = file_name.substring(file_name.lastIndexOf('.')).toLowerCase();
+		let rawText = '';
 
 		if (ext === '.pdf') {
 			console.log(`[parseTelegramFile] Parsing PDF via unpdf...`);
 			const pdf = await getDocumentProxy(new Uint8Array(arrayBuffer));
 			const { totalPages, text } = await extractText(pdf, { mergePages: true });
 			console.log(`[parseTelegramFile] PDF parsed successfully. Total Pages: ${totalPages}, Text Length: ${text.length}`);
-			return truncateFileContent(text, limit) || 'PDF parsed successfully but no text content found.';
-		}
-		
-		if (ext === '.docx' || ext === '.doc') {
+			rawText = text || '';
+		} else if (ext === '.docx' || ext === '.doc') {
 			console.log(`[parseTelegramFile] Parsing DOCX/DOC via JSZip...`);
 			try {
 				const zip = await JSZip.loadAsync(arrayBuffer);
 				const documentXml = await zip.file('word/document.xml')?.async('text');
-				if (!documentXml) {
-					return 'Error: word/document.xml not found in DOCX zip.';
+				if (documentXml) {
+					const matches = documentXml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
+					rawText = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ').trim();
 				}
-				const matches = documentXml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
-				const text = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
-				console.log(`[parseTelegramFile] DOCX/DOC parsed successfully via JSZip. Text Length: ${text.length}`);
-				return truncateFileContent(text.trim(), limit) || 'DOCX/DOC parsed successfully but no text content found.';
 			} catch (e) {
 				console.log(`[parseTelegramFile] JSZip failed for DOCX/DOC. Falling back to legacy binary string extraction...`);
-				const text = extractPrintableStrings(arrayBuffer);
-				return truncateFileContent(text, limit) || 'DOC/DOCX parsed but no text content found.';
+				rawText = extractPrintableStrings(arrayBuffer);
 			}
-		}
-
-		if (ext === '.pptx' || ext === '.ppt') {
+		} else if (ext === '.pptx' || ext === '.ppt') {
 			console.log(`[parseTelegramFile] Parsing PPTX/PPT via JSZip...`);
 			try {
 				const zip = await JSZip.loadAsync(arrayBuffer);
@@ -117,27 +121,69 @@ export async function parseTelegramFile(
 						}
 					}
 				}
-				console.log(`[parseTelegramFile] PPTX/PPT parsed successfully via JSZip. Total slides parsed: ${slideTexts.length}`);
-				return truncateFileContent(slideTexts.join('\n\n'), limit) || 'PPTX/PPT parsed successfully but no text content found.';
+				rawText = slideTexts.join('\n\n');
 			} catch (e) {
 				console.log(`[parseTelegramFile] JSZip failed for PPTX/PPT. Falling back to legacy binary string extraction...`);
-				const text = extractPrintableStrings(arrayBuffer);
-				return truncateFileContent(text, limit) || 'PPT/PPTX parsed but no text content found.';
+				rawText = extractPrintableStrings(arrayBuffer);
+			}
+		} else if (ext === '.txt' || ext === '.md' || ext === '.markdown') {
+			console.log(`[parseTelegramFile] Parsing TXT/MD file...`);
+			const decoder = new TextDecoder('utf-8');
+			rawText = decoder.decode(arrayBuffer);
+		} else {
+			console.log(`[parseTelegramFile] Reading file as plain text fallback...`);
+			const decoder = new TextDecoder('utf-8');
+			rawText = decoder.decode(arrayBuffer);
+		}
+
+		if (!rawText.trim()) {
+			return 'Document parsed successfully but no text content found.';
+		}
+
+		// RAG flow for large files
+		if (rawText.length >= 5000 && env.VECTORIZE) {
+			const indexedKey = `indexed:${file_id}`;
+			const isAlreadyIndexed = await env.CONVERSATION_HISTORY.get(indexedKey);
+			if (isAlreadyIndexed) {
+				console.log(`[parseTelegramFile] File ${file_id} already indexed. Skipping indexing.`);
+				return `[SUCCESS] The document "${file_name}" is large and has been successfully indexed into the vector database. To access its contents, you MUST use the "search_telegram_file" tool with specific search queries. Do NOT assume you know the contents without searching.`;
+			}
+
+			const chunks = chunkText(rawText, 1000, 200);
+			console.log(`[parseTelegramFile] Chunked document into ${chunks.length} chunks. Generating embeddings...`);
+
+			// Generate embeddings for all chunks via Workers AI
+			const embedRes = (await env.AI.run('@cf/baai/bge-large-en-v1.5', {
+				text: chunks
+			})) as { data: number[][] };
+
+			if (embedRes && embedRes.data && embedRes.data.length > 0) {
+				const vectors = chunks.map((chunk, idx) => ({
+					id: `${file_id}_${idx}`,
+					values: embedRes.data[idx],
+					metadata: {
+						file_id,
+						file_name,
+						text: chunk,
+						chunk_index: idx
+					}
+				}));
+
+				// Batch upsert in sizes of 20
+				const batchSize = 20;
+				for (let i = 0; i < vectors.length; i += batchSize) {
+					const batch = vectors.slice(i, i + batchSize);
+					await env.VECTORIZE.upsert(batch);
+				}
+
+				await env.CONVERSATION_HISTORY.put(indexedKey, 'true', { expirationTtl: 86400 * 7 });
+				console.log(`[parseTelegramFile] Successfully indexed ${chunks.length} vectors for ${file_id}`);
+				return `[SUCCESS] The document "${file_name}" is large and has been successfully indexed into the vector database. To access its contents, you MUST use the "search_telegram_file" tool with specific search queries. Do NOT assume you know the contents without searching.`;
 			}
 		}
 
-		if (ext === '.txt' || ext === '.md' || ext === '.markdown') {
-			console.log(`[parseTelegramFile] Parsing TXT/MD file...`);
-			const decoder = new TextDecoder('utf-8');
-			const text = decoder.decode(arrayBuffer);
-			return truncateFileContent(text, limit) || 'TXT/MD file is empty.';
-		}
-
-		// Fallback for all other files
-		console.log(`[parseTelegramFile] Reading file as plain text fallback...`);
-		const decoder = new TextDecoder('utf-8');
-		const text = decoder.decode(arrayBuffer);
-		return truncateFileContent(text, limit) || 'File is empty.';
+		// Fallback for smaller files or if VECTORIZE is not bound
+		return truncateFileContent(rawText, limit);
 
 	} catch (e) {
 		console.error(`[parseTelegramFile] Unexpected error:`, e);
@@ -146,7 +192,7 @@ export async function parseTelegramFile(
 }
 
 export const createTelegramFileReaderTool = (
-	telegramToken: string,
+	env: Environment,
 	sandboxBinding: unknown,
 	userId: string,
 	messages: ChatMessage[],
@@ -169,7 +215,62 @@ export const createTelegramFileReaderTool = (
 			required: ['file_id', 'file_name'],
 		},
 		function: async ({ file_id, file_name }: { file_id: string; file_name: string }) => {
-			return await parseTelegramFile(telegramToken, sandboxBinding, userId, file_id, file_name, supportsVision, messages, limit);
+			return await parseTelegramFile(env, sandboxBinding, userId, file_id, file_name, supportsVision, messages, limit);
 		},
+	};
+};
+
+export const createTelegramFileSearchTool = (
+	env: Environment,
+	_modelId: string
+) => {
+	return {
+		name: 'search_telegram_file',
+		description: 'Search the contents of an indexed large Telegram document using semantic search (Vector RAG). Use this tool to answer specific questions about the document.',
+		parameters: {
+			type: 'object',
+			properties: {
+				file_id: { type: 'string', description: 'The Telegram file_id of the document' },
+				query: { type: 'string', description: 'The semantic search query to look up inside the document' },
+			},
+			required: ['file_id', 'query'],
+		},
+		function: async ({ file_id, query }: { file_id: string; query: string }) => {
+			try {
+				if (!env.VECTORIZE) {
+					return 'Error: Vectorize index is not bound in this environment.';
+				}
+				console.log(`[search_telegram_file] Embedding query: "${query}"`);
+				const embedRes = (await env.AI.run('@cf/baai/bge-large-en-v1.5', {
+					text: [query]
+				})) as { data: number[][] };
+
+				const queryVector = embedRes.data[0];
+
+				console.log(`[search_telegram_file] Querying Vectorize for FileID: ${file_id}`);
+				const searchRes = await env.VECTORIZE.query(queryVector, {
+					topK: 3,
+					filter: { file_id },
+					returnMetadata: true
+				});
+
+				if (!searchRes.matches || searchRes.matches.length === 0) {
+					return `No relevant matches found in the document for query: "${query}"`;
+				}
+
+				const matches = searchRes.matches
+					.map((match, i) => {
+						const metadata = match.metadata as { text?: string; chunk_index?: number };
+						const text = metadata?.text || 'No text content';
+						return `[Match ${i + 1}] (Relevance: ${(match.score * 100).toFixed(1)}%)\n${text}`;
+					})
+					.join('\n\n');
+
+				return `Search results for "${query}":\n\n${matches}`;
+			} catch (e) {
+				console.error(`[search_telegram_file] Error querying vector index:`, e);
+				return `Error executing search_telegram_file: ${String(e)}`;
+			}
+		}
 	};
 };

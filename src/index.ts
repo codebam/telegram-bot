@@ -7,7 +7,7 @@ import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
 import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
-import { createTelegramFileReaderTool } from './lib/documentTool.js';
+import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
 export { Sandbox } from '@cloudflare/sandbox';
@@ -385,7 +385,8 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 							wikipediaTool,
 							createTavilySearchTool(env.TAVILY_API_KEY || ''),
 							createSandboxTool(env.Sandbox, String(userId)),
-							createTelegramFileReaderTool(env.SECRET_TELEGRAM_API_TOKEN, env.Sandbox, String(userId), messages, modelId),
+							createTelegramFileReaderTool(env, env.Sandbox, String(userId), messages, modelId),
+							createTelegramFileSearchTool(env, modelId),
 						],
 					);
 
@@ -897,7 +898,8 @@ export default {
 						wikipediaTool,
 						createTavilySearchTool(env.TAVILY_API_KEY || ''),
 						createSandboxTool(env.Sandbox, String(task.userId)),
-						createTelegramFileReaderTool(token, env.Sandbox, String(task.userId), messages, modelId),
+						createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, modelId),
+						createTelegramFileSearchTool(env, modelId),
 					],
 				);
 
@@ -965,7 +967,8 @@ export default {
 				wikipediaTool,
 				createTavilySearchTool(env.TAVILY_API_KEY || ''),
 				createSandboxTool(env.Sandbox, String(task.userId)),
-				createTelegramFileReaderTool(env.SECRET_TELEGRAM_API_TOKEN, env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
+				createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
+				createTelegramFileSearchTool(env, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
 			];
 
 			const aiResponse = await customRunWithTools(
