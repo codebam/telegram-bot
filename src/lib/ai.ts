@@ -248,116 +248,16 @@ export async function customRunWithTools(
 	};
 
 	let turn = 0;
-	let responseToProcess: any = null;
-
 	while (turn < 5) {
-		const shouldStream = config.streamFinalResponse;
+		const isFinalTurn = turn > 0 || cfTools.length === 0;
+		const shouldStream = isFinalTurn ? config.streamFinalResponse : false;
 		const response = await runModel(messages, shouldStream, turn > 0);
 
-		if (response && typeof (response as any).getReader === 'function') {
-			if (turn > 0 || cfTools.length === 0) {
-				return response as ReadableStream;
-			}
-
-			const reader = (response as ReadableStream).getReader();
-			const chunks: Uint8Array[] = [];
-			const decoder = new TextDecoder();
-			let isToolCall = false;
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				chunks.push(value);
-				const chunkStr = decoder.decode(value, { stream: true });
-
-				if (chunkStr.includes('"tool_calls"') || chunkStr.includes('"functionCall"') || chunkStr.includes('"function_call"')) {
-					isToolCall = true;
-					break;
-				}
-
-				if (chunkStr.includes('"content"') || chunkStr.includes('"text"') || chunkStr.includes('"response"') || chunkStr.includes('"parts"') || chunkStr.includes('"reasoning_content"') || chunkStr.includes('"thought"')) {
-					return new ReadableStream({
-						start(controller) {
-							for (const c of chunks) controller.enqueue(c);
-						},
-						async pull(controller) {
-							const { done, value } = await reader.read();
-							if (done) controller.close();
-							else controller.enqueue(value);
-						},
-						cancel() {
-							reader.cancel();
-						}
-					});
-				}
-			}
-
-			if (isToolCall) {
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					chunks.push(value);
-				}
-				const fullText = chunks.map(c => decoder.decode(c, { stream: true })).join('');
-				const lines = fullText.split('\n');
-				let combinedResponse: any = { tool_calls: [] };
-				for (const line of lines) {
-					const trimmed = line.trim();
-					if (trimmed.startsWith('data: ')) {
-						const data = trimmed.substring(6);
-						if (data === '[DONE]') break;
-						try {
-							const parsed = JSON.parse(data);
-							const delta = parsed.choices?.[0]?.delta;
-							if (delta?.tool_calls) {
-								for (const tc of delta.tool_calls) {
-									const idx = tc.index;
-									if (idx !== undefined) {
-										if (!combinedResponse.tool_calls[idx]) combinedResponse.tool_calls[idx] = tc;
-										else {
-											if (tc.function?.arguments) combinedResponse.tool_calls[idx].function.arguments += tc.function.arguments;
-											if (tc.function?.name) combinedResponse.tool_calls[idx].function.name += tc.function.name;
-										}
-									}
-								}
-							}
-						} catch { /* ignore */ }
-					}
-				}
-				responseToProcess = combinedResponse;
-			} else if (chunks.length > 0) {
-				// We exhausted the stream but didn't find tool calls. Treat as static response.
-				const fullText = chunks.map(c => decoder.decode(c, { stream: true })).join('');
-				const lines = fullText.split('\n');
-				let combinedResponse: any = { choices: [{ message: { content: '' } }] };
-				for (const line of lines) {
-					const trimmed = line.trim();
-					if (trimmed.startsWith('data: ')) {
-						const data = trimmed.substring(6);
-						if (data === '[DONE]') break;
-						try {
-							const parsed = JSON.parse(data);
-							const delta = parsed.choices?.[0]?.delta;
-							if (delta?.content) combinedResponse.choices[0].message.content += delta.content;
-							if (delta?.reasoning_content) {
-								if (!combinedResponse.choices[0].message.reasoning_content) combinedResponse.choices[0].message.reasoning_content = '';
-								combinedResponse.choices[0].message.reasoning_content += delta.reasoning_content;
-							}
-						} catch { /* ignore */ }
-					}
-				}
-				responseToProcess = combinedResponse;
-			}
-		} else {
-			responseToProcess = response;
+		if (shouldStream || (response && typeof (response as any).getReader === 'function')) {
+			return response as ReadableStream;
 		}
 
-		if (!responseToProcess) {
-			console.log('[customRunWithTools] No response to process, breaking loop.');
-			break;
-		}
-
-		const aiRes = responseToProcess as AiResponse;
+		const aiRes = response as AiResponse;
 		let toolCalls: RawToolCall[] = [];
 		let geminiParts: GeminiPart[] = [];
 
@@ -680,6 +580,17 @@ export async function streamAiResponseToTelegram(
 	const draftId = task.updateId || Date.now();
 
 	console.log(`[streamAiResponseToTelegram] Starting for task: ${task.type}, updateType: ${task.updateType}, model: ${modelId}`);
+
+	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
+		await sendMessageDraft(token, {
+			chat_id: task.chatId,
+			text: '>Thinking',
+			parse_mode: 'MarkdownV2',
+			message_thread_id: task.threadId,
+			business_connection_id: task.businessConnectionId,
+			draft_id: draftId,
+		});
+	}
 
 	let streamContent = '';
 	let thinkingContent = '';
