@@ -23,7 +23,6 @@ type MyContext = StreamFlavor<BaseContext & ConversationFlavor<BaseContext>>;
 type MyConversation = Conversation<MyContext, MyContext>;
 
 async function getBusinessOwnerData(
-	ctx: Context,
 	env: Environment,
 	connectionId: string
 ): Promise<{ id: number; name: string; username?: string } | null> {
@@ -92,7 +91,7 @@ async function chargeStars(
 		const customerId = ctx.update.business_message?.chat.id;
 		if (connectionId && customerId) {
 			userId = `business:${connectionId}:${customerId}`;
-			const ownerData = await getBusinessOwnerData(ctx, ctx.env, connectionId);
+			const ownerData = await getBusinessOwnerData(ctx.env, connectionId);
 			if (ownerData?.id) {
 				billingUserId = ownerData.id;
 			}
@@ -148,7 +147,7 @@ async function chargeStars(
 				let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
 				const connectionId = ctx.update.business_message?.business_connection_id;
 				if (connectionId) {
-					const ownerData = await getBusinessOwnerData(ctx, ctx.env, connectionId);
+					const ownerData = await getBusinessOwnerData(ctx.env, connectionId);
 					if (ownerData) {
 						prompt = prompt.replace(/{owner_name}/g, ownerData.name);
 						const facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
@@ -240,7 +239,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 				if (ctx.update.business_message) {
 					const connectionId = ctx.update.business_message?.business_connection_id;
 					if (connectionId) {
-						ownerData = await conversation.external(() => getBusinessOwnerData(ctx, env, connectionId));
+						ownerData = await conversation.external(() => getBusinessOwnerData(env, connectionId));
 						if (ownerData?.id) {
 							billingUserId = ownerData.id;
 						}

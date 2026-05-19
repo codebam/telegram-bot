@@ -24,7 +24,6 @@
 		"@grammyjs/storage-cloudflare": "^2.4.2",
 		"@grammyjs/stream": "^1.0.1",
 		"@grammyjs/types": "^3.27.3",
-		"grammy": "^1.43.0",
-		"marked": "^18.0.3"
+		"grammy": "^1.43.0"
 	}
 }

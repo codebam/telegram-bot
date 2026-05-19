@@ -1,5 +1,3 @@
-import { marked } from 'marked';
-
 export const fetchTool = {
 	name: 'fetch',
 	description:
