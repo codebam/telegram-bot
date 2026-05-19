@@ -223,7 +223,8 @@ export async function customRunWithTools(
 
 			console.log(`[customRunWithTools] Calling ai.run with options:`, JSON.stringify({
 				...options,
-				messages: (options.messages as any[]).map(m => ({ role: m.role, contentLength: m.content?.length, keys: Object.keys(m) }))
+				messages: (options.messages as any[]).map(m => ({ role: m.role, contentLength: m.content?.length, keys: Object.keys(m) })),
+				tools: options.tools ? (options.tools as any[]).map(t => t.function?.name || t.name) : undefined
 			}));
 
 			const result = await ai.run(model, options);
