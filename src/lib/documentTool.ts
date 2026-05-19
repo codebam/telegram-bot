@@ -11,73 +11,60 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 	return btoa(binary);
 }
 
-export const createTelegramFileReaderTool = (
+export async function parseTelegramFile(
 	telegramToken: string,
 	sandboxBinding: DurableObjectNamespace<Sandbox>,
 	userId: string,
-	messages: ChatMessage[],
-	modelId: string
-) => {
-	const modelConfig = Object.values(AVAILABLE_MODELS).find((cfg) => cfg.id === modelId);
-	const supportsVision = modelConfig?.supportsVision || false;
+	file_id: string,
+	file_name: string,
+	supportsVision: boolean,
+	messages?: ChatMessage[]
+): Promise<string> {
+	try {
+		console.log(`[parseTelegramFile] FileID: ${file_id}, Name: ${file_name}, SupportsVision: ${supportsVision}`);
+		
+		const getFileUrl = `https://api.telegram.org/bot${telegramToken}/getFile?file_id=${file_id}`;
+		const getFileRes = await fetch(getFileUrl);
+		if (!getFileRes.ok) {
+			console.error(`[parseTelegramFile] Telegram getFile failed: ${getFileRes.status}`);
+			return `Error: Failed to fetch file info from Telegram API. Status: ${getFileRes.status}`;
+		}
+		const getFileData = (await getFileRes.json()) as { ok: boolean; result?: { file_path?: string } };
+		if (!getFileData.ok || !getFileData.result?.file_path) {
+			console.error(`[parseTelegramFile] Telegram getFile response invalid:`, getFileData);
+			return `Error: Failed to retrieve file path from Telegram API response.`;
+		}
 
-	return {
-		name: 'read_telegram_file',
-		description: 'Read the contents of a Telegram file (such as PDF, DOCX, PPTX, or text files) given its file_id and file_name. If the file is a PDF and the model supports vision, it will also render PDF pages as images and attach them directly to the conversation history so you can see them.',
-		parameters: {
-			type: 'object',
-			properties: {
-				file_id: { type: 'string', description: 'The Telegram file_id of the document' },
-				file_name: { type: 'string', description: 'The original file name' },
-			},
-			required: ['file_id', 'file_name'],
-		},
-		function: async ({ file_id, file_name }: { file_id: string; file_name: string }) => {
+		const downloadUrl = `https://api.telegram.org/file/bot${telegramToken}/${getFileData.result.file_path}`;
+		const downloadRes = await fetch(downloadUrl);
+		if (!downloadRes.ok) {
+			console.error(`[parseTelegramFile] Telegram file download failed: ${downloadRes.status}`);
+			return `Error: Failed to download file from Telegram. Status: ${downloadRes.status}`;
+		}
+		const arrayBuffer = await downloadRes.arrayBuffer();
+		const base64Content = arrayBufferToBase64(arrayBuffer);
+		console.log(`[parseTelegramFile] File downloaded from Telegram. Base64 length: ${base64Content.length} bytes`);
+
+		const sandbox = getSandbox(sandboxBinding, userId);
+		const safeFileName = file_name.replace(/[^a-zA-Z0-9.-]/g, '_');
+		const sandboxPath = `/workspace/${safeFileName}`;
+		
+		let retries = 3;
+		while (retries > 0) {
 			try {
-				console.log(`[read_telegram_file] FileID: ${file_id}, Name: ${file_name}, SupportsVision: ${supportsVision}`);
-				
-				const getFileUrl = `https://api.telegram.org/bot${telegramToken}/getFile?file_id=${file_id}`;
-				const getFileRes = await fetch(getFileUrl);
-				if (!getFileRes.ok) {
-					console.error(`[read_telegram_file] Telegram getFile failed: ${getFileRes.status}`);
-					return `Error: Failed to fetch file info from Telegram API. Status: ${getFileRes.status}`;
-				}
-				const getFileData = (await getFileRes.json()) as { ok: boolean; result?: { file_path?: string } };
-				if (!getFileData.ok || !getFileData.result?.file_path) {
-					console.error(`[read_telegram_file] Telegram getFile response invalid:`, getFileData);
-					return `Error: Failed to retrieve file path from Telegram API response.`;
-				}
+				await sandbox.writeFile(sandboxPath, base64Content, { encoding: 'base64' });
+				console.log(`[parseTelegramFile] sandbox.writeFile completed for path: ${sandboxPath}`);
+				break;
+			} catch (err) {
+				retries--;
+				console.warn(`[parseTelegramFile] writeFile failed. Retries left: ${retries}. Error:`, err);
+				if (retries === 0) throw err;
+				await new Promise((resolve) => setTimeout(resolve, 2000));
+			}
+		}
 
-				const downloadUrl = `https://api.telegram.org/file/bot${telegramToken}/${getFileData.result.file_path}`;
-				const downloadRes = await fetch(downloadUrl);
-				if (!downloadRes.ok) {
-					console.error(`[read_telegram_file] Telegram file download failed: ${downloadRes.status}`);
-					return `Error: Failed to download file from Telegram. Status: ${downloadRes.status}`;
-				}
-				const arrayBuffer = await downloadRes.arrayBuffer();
-				const base64Content = arrayBufferToBase64(arrayBuffer);
-				console.log(`[read_telegram_file] File downloaded from Telegram. Base64 length: ${base64Content.length} bytes`);
-
-				const sandbox = getSandbox(sandboxBinding, userId);
-				const safeFileName = file_name.replace(/[^a-zA-Z0-9.-]/g, '_');
-				const sandboxPath = `/workspace/${safeFileName}`;
-				
-				let retries = 3;
-				while (retries > 0) {
-					try {
-						await sandbox.writeFile(sandboxPath, base64Content, { encoding: 'base64' });
-						console.log(`[read_telegram_file] sandbox.writeFile completed for path: ${sandboxPath}`);
-						break;
-					} catch (err) {
-						retries--;
-						console.warn(`[read_telegram_file] writeFile failed. Retries left: ${retries}. Error:`, err);
-						if (retries === 0) throw err;
-						await new Promise((resolve) => setTimeout(resolve, 2000));
-					}
-				}
-
-				console.log(`[read_telegram_file] Starting Python parser in sandbox...`);
-				const pythonCode = `
+		console.log(`[parseTelegramFile] Starting Python parser in sandbox...`);
+		const pythonCode = `
 import sys
 import os
 import json
@@ -158,49 +145,74 @@ res = process_file(${JSON.stringify(sandboxPath)}, ${supportsVision ? 'True' : '
 print(json.dumps(res))
 `;
 
-				const execResult = await sandbox.runCode(pythonCode, { language: 'python' });
-				const stdout = execResult.logs.stdout.join('');
-				const stderr = execResult.logs.stderr.join('');
-				console.log(`[read_telegram_file] Python execution done. Error: ${execResult.error ? execResult.error.message : 'none'}. Stdout size: ${stdout.length}, Stderr size: ${stderr.length}`);
+		const execResult = await sandbox.runCode(pythonCode, { language: 'python' });
+		const stdout = execResult.logs.stdout.join('');
+		const stderr = execResult.logs.stderr.join('');
+		console.log(`[parseTelegramFile] Python execution done. Error: ${execResult.error ? execResult.error.message : 'none'}. Stdout size: ${stdout.length}, Stderr size: ${stderr.length}`);
 
-				if (execResult.error) {
-					console.error(`[read_telegram_file] Python error:`, execResult.error);
-					return `Error executing document parser: ${execResult.error.message}\nStderr: ${stderr}`;
-				}
+		if (execResult.error) {
+			console.error(`[parseTelegramFile] Python error:`, execResult.error);
+			return `Error executing document parser: ${execResult.error.message}\nStderr: ${stderr}`;
+		}
 
-				try {
-					const parsedResult = JSON.parse(stdout.trim()) as { text: string; images: string[] };
+		try {
+			const parsedResult = JSON.parse(stdout.trim()) as { text: string; images: string[] };
 
-					if (parsedResult.images && parsedResult.images.length > 0) {
-						const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
-						if (lastUserMsg) {
-							if (!lastUserMsg.geminiParts) {
-								lastUserMsg.geminiParts = [];
-								if (lastUserMsg.content) {
-									lastUserMsg.geminiParts.push({ text: lastUserMsg.content });
-								}
-							}
-							for (const imgBase64 of parsedResult.images) {
-								lastUserMsg.geminiParts.push({
-									inlineData: {
-										mimeType: 'image/jpeg',
-										data: imgBase64,
-									},
-								});
-							}
-							console.log(`[read_telegram_file] Attached ${parsedResult.images.length} page images to Gemini parts`);
+			if (parsedResult.images && parsedResult.images.length > 0 && messages) {
+				const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
+				if (lastUserMsg) {
+					if (!lastUserMsg.geminiParts) {
+						lastUserMsg.geminiParts = [];
+						if (lastUserMsg.content) {
+							lastUserMsg.geminiParts.push({ text: lastUserMsg.content });
 						}
 					}
-
-					return parsedResult.text || 'Document parsed successfully but no text content found.';
-				} catch (e) {
-					console.error(`[read_telegram_file] JSON Parse Error. Stdout:`, stdout, `Error:`, e);
-					return `Error: Failed to parse tool output. Stdout: ${stdout}\nStderr: ${stderr}`;
+					for (const imgBase64 of parsedResult.images) {
+						lastUserMsg.geminiParts.push({
+							inlineData: {
+								mimeType: 'image/jpeg',
+								data: imgBase64,
+							},
+						});
+					}
+					console.log(`[parseTelegramFile] Attached ${parsedResult.images.length} page images to Gemini parts`);
 				}
-			} catch (e) {
-				console.error(`[read_telegram_file] Unexpected error:`, e);
-				return `Error executing read_telegram_file: ${String(e)}`;
 			}
+
+			return parsedResult.text || 'Document parsed successfully but no text content found.';
+		} catch (e) {
+			console.error(`[parseTelegramFile] JSON Parse Error. Stdout:`, stdout, `Error:`, e);
+			return `Error: Failed to parse tool output. Stdout: ${stdout}\nStderr: ${stderr}`;
+		}
+	} catch (e) {
+		console.error(`[parseTelegramFile] Unexpected error:`, e);
+		return `Error executing parseTelegramFile: ${String(e)}`;
+	}
+}
+
+export const createTelegramFileReaderTool = (
+	telegramToken: string,
+	sandboxBinding: DurableObjectNamespace<Sandbox>,
+	userId: string,
+	messages: ChatMessage[],
+	modelId: string
+) => {
+	const modelConfig = Object.values(AVAILABLE_MODELS).find((cfg) => cfg.id === modelId);
+	const supportsVision = modelConfig?.supportsVision || false;
+
+	return {
+		name: 'read_telegram_file',
+		description: 'Read the contents of a Telegram file (such as PDF, DOCX, PPTX, or text files) given its file_id and file_name. If the file is a PDF and the model supports vision, it will also render PDF pages as images and attach them directly to the conversation history so you can see them.',
+		parameters: {
+			type: 'object',
+			properties: {
+				file_id: { type: 'string', description: 'The Telegram file_id of the document' },
+				file_name: { type: 'string', description: 'The original file name' },
+			},
+			required: ['file_id', 'file_name'],
+		},
+		function: async ({ file_id, file_name }: { file_id: string; file_name: string }) => {
+			return await parseTelegramFile(telegramToken, sandboxBinding, userId, file_id, file_name, supportsVision, messages);
 		},
 	};
 };
