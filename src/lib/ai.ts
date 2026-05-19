@@ -574,7 +574,7 @@ export interface StreamCtx {
 	replyWithStream?: StreamContextExtension['replyWithStream'];
 }
 
-async function formatTelegramMessage(content: string, thinking?: string, reasoning?: string): Promise<string> {
+async function formatTelegramMessage(content: string, thinking?: string, reasoning?: string, skipMarkdown = false): Promise<string> {
 	let message = '';
 	if (thinking) {
 		const trimmedThinking = thinking.trim().replace(/\n\n$/, '\n');
@@ -585,7 +585,11 @@ async function formatTelegramMessage(content: string, thinking?: string, reasoni
 		const sanitizedReasoning = sanitizeMarkdownV2(reasoning.trim());
 		message += `*Reasoning*\n${sanitizedReasoning}\n\n`;
 	}
-	message += await markdownToMarkdownV2(content);
+	if (skipMarkdown) {
+		message += sanitizeMarkdownV2(content);
+	} else {
+		message += await markdownToMarkdownV2(content);
+	}
 	return message;
 }
 
@@ -638,10 +642,10 @@ export async function streamAiResponseToTelegram(
 			if (
 				task.updateType !== 'guest_message' &&
 				task.updateType !== 'business_message' &&
-				now - lastUpdate.time > 2000
+				now - lastUpdate.time > 3000
 			) {
 				const text = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
-					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''))
+					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''), true)
 					: (hasSeenReasoning ? '>Reasoning' : '>Thinking');
 
 				await sendMessageDraft(token, {
