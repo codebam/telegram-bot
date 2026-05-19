@@ -327,9 +327,11 @@ export async function customRunWithTools(
 
 		if (toolCalls.length > 0) {
 			const normalizedToolCalls: NormalizedToolCall[] = toolCalls.map((call, index) => {
-				const name = call.name || call.function?.name || '';
-				let args = call.arguments ?? call.function?.arguments ?? '';
-				if (typeof args !== 'string') {
+				let name = call.name || call.function?.name || '';
+				if (name.startsWith('functions.')) {
+					name = name.substring(10);
+				}
+				let args = call.arguments ?? call.function?.arguments ?? '';				if (typeof args !== 'string') {
 					try {
 						args = JSON.stringify(args);
 					} catch {
