@@ -3,6 +3,7 @@ import type { Api } from 'grammy';
 import type { MessageDraftPiece, StreamContextExtension } from '@grammyjs/stream';
 import {
 	markdownToHtml,
+	AVAILABLE_MODELS,
 	type AiResponse,
 	type ChatMessage,
 	type GeminiPart,
@@ -151,9 +152,58 @@ export async function customRunWithTools(
 	config: { streamFinalResponse: boolean }
 ): Promise<AiResponse | ReadableStream> {
 	console.log(`[customRunWithTools] Model: ${model}, Tools: ${input.tools?.length || 0}, Stream: ${config.streamFinalResponse}`);
-	const messages: ChatMessage[] = [...input.messages];
-	const tools = input.tools || [];
+	
+	const modelConfig = Object.values(AVAILABLE_MODELS).find((cfg) => cfg.id === model);
+	const supportsVision = modelConfig?.supportsVision || false;
 	const isGemini = model.includes('google/gemini');
+
+	const messages: ChatMessage[] = input.messages.map((m) => {
+		if (m.geminiParts) {
+			if (!supportsVision) {
+				const textParts = m.geminiParts.filter(p => !p.inlineData);
+				const firstText = textParts.find(p => p.text)?.text || m.content;
+				return {
+					...m,
+					content: firstText,
+					geminiParts: undefined
+				};
+			} else if (!isGemini) {
+				const hasImage = m.geminiParts.some(p => p.inlineData);
+				if (hasImage) {
+					const contentParts: any[] = [];
+					const textPart = m.geminiParts.find(p => p.text);
+					if (textPart && textPart.text) {
+						contentParts.push({ type: 'text', text: textPart.text });
+					} else if (m.content) {
+						contentParts.push({ type: 'text', text: m.content });
+					}
+
+					for (const part of m.geminiParts) {
+						if (part.inlineData) {
+							const binaryString = atob(part.inlineData.data);
+							const len = binaryString.length;
+							const bytes = new Uint8Array(len);
+							for (let i = 0; i < len; i++) {
+								bytes[i] = binaryString.charCodeAt(i);
+							}
+							contentParts.push({
+								type: 'image',
+								image: Array.from(bytes)
+							});
+						}
+					}
+					return {
+						...m,
+						content: contentParts as any,
+						geminiParts: undefined
+					};
+				}
+			}
+		}
+		return { ...m };
+	});
+
+	const tools = input.tools || [];
 
 	const cfTools = tools.map((t) => ({
 		name: t.name,

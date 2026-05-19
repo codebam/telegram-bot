@@ -5,11 +5,22 @@ import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
-import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment } from '@codebam/shared';
+import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
+import { createTelegramFileReaderTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
 export { Sandbox } from '@cloudflare/sandbox';
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+	let binary = '';
+	const bytes = new Uint8Array(buffer);
+	const len = bytes.byteLength;
+	for (let i = 0; i < len; i++) {
+		binary += String.fromCharCode(bytes[i]);
+	}
+	return btoa(binary);
+}
 
 type BaseContext = CommandsFlavor &
 	Context & {
@@ -224,11 +235,41 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 		while (true) {
 			let prompt = ctx.message?.text || ctx.message?.caption || ctx.update.business_message?.text || ctx.update.business_message?.caption || '';
 
+			const geminiParts: GeminiPart[] = [];
+			const photo = ctx.message?.photo || ctx.update.business_message?.photo;
+			if (photo) {
+				const largestPhoto = photo[photo.length - 1];
+				const file = await conversation.external(() => ctx.api.getFile(largestPhoto.file_id));
+				const fileUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
+				const fileRes = await conversation.external(() => fetch(fileUrl));
+				if (fileRes.ok) {
+					const arrayBuffer = await fileRes.arrayBuffer();
+					const base64Data = arrayBufferToBase64(arrayBuffer);
+					geminiParts.push({
+						inlineData: {
+							mimeType: 'image/jpeg',
+							data: base64Data
+						}
+					});
+				}
+			}
+
+			if (ctx.message?.document) {
+				const doc = ctx.message.document;
+				prompt = `[Uploaded Document: Name="${doc.file_name || 'document'}", MIME="${doc.mime_type || ''}", FileID="${doc.file_id}"]\n\n${prompt || 'Please process this document.'}`;
+			}
+
 			const replyToMessage = ctx.message?.reply_to_message || ctx.update.business_message?.reply_to_message;
 			if (replyToMessage) {
-				const replyText = replyToMessage.text || replyToMessage.caption || '';
-				if (replyText) {
-					prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
+				if (replyToMessage.document) {
+					const replyDoc = replyToMessage.document;
+					const replyText = replyToMessage.caption || '';
+					prompt = `Context of the uploaded document I am replying to: Name="${replyDoc.file_name || 'document'}", MIME="${replyDoc.mime_type || ''}", FileID="${replyDoc.file_id}"${replyText ? ` with caption "${replyText}"` : ''}\n\nMy message: ${prompt}`;
+				} else {
+					const replyText = replyToMessage.text || replyToMessage.caption || '';
+					if (replyText) {
+						prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
+					}
 				}
 			}
 
@@ -282,10 +323,18 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 						return customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
 					});
 
+					const userMessage: ChatMessage = { role: 'user', content: prompt };
+					if (geminiParts.length > 0) {
+						userMessage.geminiParts = [
+							{ text: prompt || 'Please describe this image' },
+							...geminiParts
+						];
+					}
+
 					const messages = [
 						{ role: 'system', content: systemPrompt },
 						...history,
-						{ role: 'user', content: prompt },
+						userMessage,
 					];
 
 					const modelId = modelConfig.id;
@@ -313,6 +362,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 							wikipediaTool,
 							createTavilySearchTool(env.TAVILY_API_KEY || ''),
 							createSandboxTool(env.Sandbox, String(userId)),
+							createTelegramFileReaderTool(env.SECRET_TELEGRAM_API_TOKEN, env.Sandbox, String(userId), messages, modelId),
 						],
 					);
 
@@ -553,6 +603,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		const id = crypto.randomUUID().slice(0, 5);
 		await ctx.env.R2.put(id, await fileResponse.arrayBuffer());
 		await ctx.reply(`https://r2.seanbehan.ca/${id}`);
+		await ctx.conversation.enter('chatConversation');
 	});
 
 	bot.on('pre_checkout_query', async (ctx) => {
@@ -586,10 +637,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	bot.on('message:photo', async (ctx) => {
-		const photo = ctx.message.photo;
-		const fileId = photo[photo.length - 1].file_id;
-		const prompt = ctx.message.caption ?? 'Please describe this image';
-		await chargeStars(ctx, { type: 'photo', prompt, fileId }, 10);
+		await ctx.conversation.enter('chatConversation');
 	});
 
 	bot.on('message:voice', async (ctx) => {
@@ -738,19 +786,43 @@ export default {
 		for (const message of batch.messages) {
 			const task = message.body;
 			try {
-				const messages = [
-					{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
-					...(task.history || []),
-					{ role: 'user', content: task.prompt },
-				];
-				const modelId = task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8';
-
 				const token = env.SECRET_TELEGRAM_API_TOKEN;
 				if (!token) {
 					throw new Error('SECRET_TELEGRAM_API_TOKEN is empty in queue handler');
 				}
 				const botInstance = new Bot<MyContext>(token);
 				botInstance.api.config.use(autoRetry());
+
+				const userMessage: ChatMessage = { role: 'user', content: task.prompt };
+				if (task.type === 'photo' && task.fileId) {
+					try {
+						const file = await botInstance.api.getFile(task.fileId);
+						const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+						const fileRes = await fetch(fileUrl);
+						if (fileRes.ok) {
+							const arrayBuffer = await fileRes.arrayBuffer();
+							const base64Data = arrayBufferToBase64(arrayBuffer);
+							userMessage.geminiParts = [
+								{ text: task.prompt || 'Please describe this image' },
+								{
+									inlineData: {
+										mimeType: 'image/jpeg',
+										data: base64Data
+									}
+								}
+							];
+						}
+					} catch (e) {
+						console.error('[Queue] Failed to download image for vision task:', e);
+					}
+				}
+
+				const messages = [
+					{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
+					...(task.history || []),
+					userMessage,
+				];
+				const modelId = task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8';
 
 				const responseContent = await streamAiResponseToTelegram(
 					{
@@ -766,6 +838,7 @@ export default {
 						wikipediaTool,
 						createTavilySearchTool(env.TAVILY_API_KEY || ''),
 						createSandboxTool(env.Sandbox, String(task.userId)),
+						createTelegramFileReaderTool(token, env.Sandbox, String(task.userId), messages, modelId),
 					],
 				);
 
@@ -793,10 +866,39 @@ export default {
 			const task = (await request.json()) as Task;
 			console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
 
+			const userMessage: ChatMessage = { role: 'user', content: task.prompt };
+			if (task.type === 'photo' && task.fileId) {
+				try {
+					const getFileRes = await fetch(`https://api.telegram.org/bot${env.SECRET_TELEGRAM_API_TOKEN}/getFile?file_id=${task.fileId}`);
+					if (getFileRes.ok) {
+						const getFileData = await getFileRes.json() as { ok: boolean, result?: { file_path?: string } };
+						if (getFileData.ok && getFileData.result?.file_path) {
+							const fileUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${getFileData.result.file_path}`;
+							const fileRes = await fetch(fileUrl);
+							if (fileRes.ok) {
+								const arrayBuffer = await fileRes.arrayBuffer();
+								const base64Data = arrayBufferToBase64(arrayBuffer);
+								userMessage.geminiParts = [
+									{ text: task.prompt || 'Please describe this image' },
+									{
+										inlineData: {
+											mimeType: 'image/jpeg',
+											data: base64Data
+										}
+									}
+								];
+							}
+						}
+					}
+				} catch (e) {
+					console.error('[Fetch] Failed to download image for vision task:', e);
+				}
+			}
+
 			const messages = [
 				{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
 				...(task.history || []),
-				{ role: 'user', content: task.prompt },
+				userMessage,
 			];
 
 			const tools = [
@@ -804,6 +906,7 @@ export default {
 				wikipediaTool,
 				createTavilySearchTool(env.TAVILY_API_KEY || ''),
 				createSandboxTool(env.Sandbox, String(task.userId)),
+				createTelegramFileReaderTool(env.SECRET_TELEGRAM_API_TOKEN, env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
 			];
 
 			const aiResponse = await customRunWithTools(
