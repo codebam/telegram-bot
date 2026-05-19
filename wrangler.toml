@@ -42,7 +42,7 @@ tag = "v1"
 [env.dev]
 name = "tux-robot-dev"
 usage_model = "standard"
-max_duration = 45
+max_duration = 300
 
 [env.dev.ai]
 binding = "AI"
@@ -79,7 +79,7 @@ name = "Sandbox"
 [env.production]
 name = "tux-robot"
 usage_model = "standard"
-max_duration = 45
+max_duration = 300
 
 [env.production.ai]
 binding = "AI"

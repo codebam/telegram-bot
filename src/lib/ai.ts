@@ -455,7 +455,8 @@ export interface StreamChunk {
  * Get AI stream for a model.
  */
 async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = [], onStatusUpdate?: (status: 'Thinking' | 'Reasoning') => void): AsyncGenerator<StreamChunk, void, unknown> {
-	console.log(`[runStream] Starting stream for model: ${model}`);
+	const startTime = Date.now();
+	console.log(`[runStream] Starting stream for model: ${model} at ${new Date(startTime).toISOString()}`);
 	yield { type: 'content', text: '' }; // Yield immediately to satisfy TTFT and unblock UI
 
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
@@ -472,6 +473,28 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 		let buffer = '';
 		let chunkCount = 0;
 		let streamFinished = false;
+
+		let pendingContent = '';
+		let pendingThinking = '';
+		let pendingReasoning = '';
+		let lastYieldTime = Date.now();
+
+		const flushPending = async function* () {
+			if (pendingThinking) {
+				yield { type: 'thinking', text: pendingThinking };
+				pendingThinking = '';
+			}
+			if (pendingReasoning) {
+				yield { type: 'reasoning', text: pendingReasoning };
+				pendingReasoning = '';
+			}
+			if (pendingContent) {
+				yield { type: 'content', text: pendingContent };
+				pendingContent = '';
+			}
+			lastYieldTime = Date.now();
+		};
+
 		try {
 			while (!streamFinished) {
 				let result;
@@ -484,7 +507,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 
 				const { done, value } = result;
 				if (done) {
-					console.log(`[runStream] Stream Done. Chunks:${chunkCount}`);
+					console.log(`[runStream] Stream Done. Chunks:${chunkCount} Duration:${Date.now() - startTime}ms`);
 					break;
 				}
 				chunkCount++;
@@ -495,8 +518,8 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 					continue;
 				}
 				
-				// Only process if we have a newline or the buffer is getting large
-				if (!buffer.includes('\n') && buffer.length < 1024) {
+				// Batch lines for processing
+				if (!buffer.includes('\n') && buffer.length < 2048) {
 					continue;
 				}
 
@@ -519,13 +542,13 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							const thinking = extractThinking(parsed);
 							if (thinking) {
 								onStatusUpdate?.('Thinking');
-								yield { type: 'thinking', text: thinking };
+								pendingThinking += thinking;
 							}
 
 							const reasoning = extractReasoning(parsed);
 							if (reasoning) {
 								onStatusUpdate?.('Reasoning');
-								yield { type: 'reasoning', text: reasoning };
+								pendingReasoning += reasoning;
 							}
 
 							const text = extractText(parsed);
@@ -538,9 +561,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 
 							if (text) {
 								const filtered = filter.push(text);
-								if (filtered) yield { type: 'content', text: filtered };
-							} else {
-								yield { type: 'content', text: '' };
+								if (filtered) pendingContent += filtered;
 							}
 						} catch (e) {
 							console.error(`[runStream] JSON ERR:${chunkCount} line:"${trimmed.slice(0, 40)}..."`, e);
@@ -551,13 +572,13 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							const thinking = extractThinking(parsed);
 							if (thinking) {
 								onStatusUpdate?.('Thinking');
-								yield { type: 'thinking', text: thinking };
+								pendingThinking += thinking;
 							}
 
 							const reasoning = extractReasoning(parsed);
 							if (reasoning) {
 								onStatusUpdate?.('Reasoning');
-								yield { type: 'reasoning', text: reasoning };
+								pendingReasoning += reasoning;
 							}
 
 							const text = extractText(parsed);
@@ -566,16 +587,21 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							}
 							if (text) {
 								const filtered = filter.push(text);
-								if (filtered) yield { type: 'content', text: filtered };
-							} else {
-								yield { type: 'content', text: '' };
+								if (filtered) pendingContent += filtered;
 							}
 						} catch (e) {
 							// Not valid JSON after all, ignore
 						}
 					}
 				}
+
+				// Yield in batches every 500ms or if pending content is large
+				if (Date.now() - lastYieldTime > 500 || pendingContent.length > 512 || pendingThinking.length > 512 || pendingReasoning.length > 512) {
+					yield* flushPending();
+				}
 			}
+			// Final flush
+			yield* flushPending();
 		} catch (outerErr) {
 			console.error(`[runStream] Fatal Loop Error:`, outerErr);
 		} finally {
@@ -585,6 +611,20 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 				// Safety release
 			}
 		}
+		const tail = filter.end();
+		if (tail) yield { type: 'content', text: tail };
+		console.log(`[runStream] Finished. TotalChunks:${chunkCount} BufferLength:${buffer.length} Duration:${Date.now() - startTime}ms`);
+	} else {
+		console.log(`[runStream] Response is not a stream. Type: ${typeof response}`);
+		const fullText = extractText(response as AiResponse, true);
+		const thinking = extractThinking(response as AiResponse);
+		const reasoning = extractReasoning(response as AiResponse);
+		const content = stripThinking(fullText);
+		if (thinking) yield { type: 'thinking', text: thinking };
+		if (reasoning) yield { type: 'reasoning', text: reasoning };
+		yield { type: 'content', text: content };
+	}
+}
 		const tail = filter.end();
 		if (tail) yield { type: 'content', text: tail };
 		console.log(`[runStream] Finished. TotalChunks:${chunkCount} BufferLength:${buffer.length}`);
