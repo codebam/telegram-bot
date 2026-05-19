@@ -148,12 +148,12 @@ export async function parseTelegramFile(
 			return 'Document parsed successfully but no text content found.';
 		}
 
-		// Store document introduction/first 3000 chars in KV cache for quick overview retrievals
+		// Store document introduction/first 10000 chars in KV cache for quick overview retrievals
 		const introKey = `doc_intro:${file_id}`;
-		await env.CONVERSATION_HISTORY.put(introKey, rawText.substring(0, 3000), { expirationTtl: 86400 * 7 });
+		await env.CONVERSATION_HISTORY.put(introKey, rawText.substring(0, 10000), { expirationTtl: 86400 * 7 });
 
 		// RAG flow for large files
-		if (rawText.length >= 30000 && env.VECTORIZE) {
+		if (rawText.length >= 10000 && env.VECTORIZE) {
 			const indexedKey = `indexed:${file_id}`;
 			const isAlreadyIndexed = await env.CONVERSATION_HISTORY.get(indexedKey);
 			if (isAlreadyIndexed) {
