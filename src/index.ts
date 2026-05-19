@@ -620,13 +620,6 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	bot.use(commands);
 
 	bot.on('message:document', async (ctx) => {
-		const fileId = ctx.message.document.file_id;
-		const file = await ctx.api.getFile(fileId);
-		const fileUrl = `https://api.telegram.org/file/bot${ctx.env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
-		const fileResponse = await fetch(fileUrl);
-		const id = crypto.randomUUID().slice(0, 5);
-		await ctx.env.R2.put(id, await fileResponse.arrayBuffer());
-		await ctx.reply(`https://r2.seanbehan.ca/${id}`);
 		await ctx.conversation.enter('chatConversation');
 	});
 
