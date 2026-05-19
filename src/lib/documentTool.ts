@@ -23,11 +23,10 @@ function extractPrintableStrings(buffer: ArrayBuffer): string {
 	return result.replace(/\s+/g, ' ').trim();
 }
 
-function truncateFileContent(text: string): string {
-	const LIMIT = 4000;
-	if (text.length > LIMIT) {
-		console.log(`[parseTelegramFile] Truncating parsed file content from ${text.length} to ${LIMIT} characters.`);
-		return text.slice(0, LIMIT) + '\n\n[Document content truncated to first 4000 characters due to token/size limits.]';
+function truncateFileContent(text: string, limit: number): string {
+	if (text.length > limit) {
+		console.log(`[parseTelegramFile] Truncating parsed file content from ${text.length} to ${limit} characters.`);
+		return text.slice(0, limit) + `\n\n[Document content truncated to first ${limit} characters due to token/size limits.]`;
 	}
 	return text;
 }
@@ -39,10 +38,11 @@ export async function parseTelegramFile(
 	file_id: string,
 	file_name: string,
 	_supportsVision: boolean,
-	_messages?: ChatMessage[]
+	_messages?: ChatMessage[],
+	limit = 2000
 ): Promise<string> {
 	try {
-		console.log(`[parseTelegramFile] Native JS parsing triggered for FileID: ${file_id}, Name: ${file_name}`);
+		console.log(`[parseTelegramFile] Native JS parsing triggered for FileID: ${file_id}, Name: ${file_name}, Limit: ${limit}`);
 		
 		const getFileUrl = `https://api.telegram.org/bot${telegramToken}/getFile?file_id=${file_id}`;
 		const getFileRes = await fetch(getFileUrl);
@@ -72,7 +72,7 @@ export async function parseTelegramFile(
 			const pdf = await getDocumentProxy(new Uint8Array(arrayBuffer));
 			const { totalPages, text } = await extractText(pdf, { mergePages: true });
 			console.log(`[parseTelegramFile] PDF parsed successfully. Total Pages: ${totalPages}, Text Length: ${text.length}`);
-			return truncateFileContent(text) || 'PDF parsed successfully but no text content found.';
+			return truncateFileContent(text, limit) || 'PDF parsed successfully but no text content found.';
 		}
 		
 		if (ext === '.docx' || ext === '.doc') {
@@ -86,11 +86,11 @@ export async function parseTelegramFile(
 				const matches = documentXml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
 				const text = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
 				console.log(`[parseTelegramFile] DOCX/DOC parsed successfully via JSZip. Text Length: ${text.length}`);
-				return truncateFileContent(text.trim()) || 'DOCX/DOC parsed successfully but no text content found.';
+				return truncateFileContent(text.trim(), limit) || 'DOCX/DOC parsed successfully but no text content found.';
 			} catch (e) {
 				console.log(`[parseTelegramFile] JSZip failed for DOCX/DOC. Falling back to legacy binary string extraction...`);
 				const text = extractPrintableStrings(arrayBuffer);
-				return truncateFileContent(text) || 'DOC/DOCX parsed but no text content found.';
+				return truncateFileContent(text, limit) || 'DOC/DOCX parsed but no text content found.';
 			}
 		}
 
@@ -118,11 +118,11 @@ export async function parseTelegramFile(
 					}
 				}
 				console.log(`[parseTelegramFile] PPTX/PPT parsed successfully via JSZip. Total slides parsed: ${slideTexts.length}`);
-				return truncateFileContent(slideTexts.join('\n\n')) || 'PPTX/PPT parsed successfully but no text content found.';
+				return truncateFileContent(slideTexts.join('\n\n'), limit) || 'PPTX/PPT parsed successfully but no text content found.';
 			} catch (e) {
 				console.log(`[parseTelegramFile] JSZip failed for PPTX/PPT. Falling back to legacy binary string extraction...`);
 				const text = extractPrintableStrings(arrayBuffer);
-				return truncateFileContent(text) || 'PPT/PPTX parsed but no text content found.';
+				return truncateFileContent(text, limit) || 'PPT/PPTX parsed but no text content found.';
 			}
 		}
 
@@ -130,14 +130,14 @@ export async function parseTelegramFile(
 			console.log(`[parseTelegramFile] Parsing TXT/MD file...`);
 			const decoder = new TextDecoder('utf-8');
 			const text = decoder.decode(arrayBuffer);
-			return truncateFileContent(text) || 'TXT/MD file is empty.';
+			return truncateFileContent(text, limit) || 'TXT/MD file is empty.';
 		}
 
 		// Fallback for all other files
 		console.log(`[parseTelegramFile] Reading file as plain text fallback...`);
 		const decoder = new TextDecoder('utf-8');
 		const text = decoder.decode(arrayBuffer);
-		return truncateFileContent(text) || 'File is empty.';
+		return truncateFileContent(text, limit) || 'File is empty.';
 
 	} catch (e) {
 		console.error(`[parseTelegramFile] Unexpected error:`, e);
@@ -154,6 +154,8 @@ export const createTelegramFileReaderTool = (
 ) => {
 	const modelConfig = Object.values(AVAILABLE_MODELS).find((cfg) => cfg.id === modelId);
 	const supportsVision = modelConfig?.supportsVision || false;
+	const isSelfHosted = modelId.startsWith('@cf/');
+	const limit = isSelfHosted ? 2000 : 12000;
 
 	return {
 		name: 'read_telegram_file',
@@ -167,7 +169,7 @@ export const createTelegramFileReaderTool = (
 			required: ['file_id', 'file_name'],
 		},
 		function: async ({ file_id, file_name }: { file_id: string; file_name: string }) => {
-			return await parseTelegramFile(telegramToken, sandboxBinding, userId, file_id, file_name, supportsVision, messages);
+			return await parseTelegramFile(telegramToken, sandboxBinding, userId, file_id, file_name, supportsVision, messages, limit);
 		},
 	};
 };
