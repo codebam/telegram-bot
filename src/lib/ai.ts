@@ -252,14 +252,28 @@ export async function customRunWithTools(
 			}
 
 			const options: Record<string, unknown> = {
-				messages: msgs,
+				messages: msgs.map((m) => {
+					// Ensure content is not null (use empty string if empty/null) to prevent schema validation crashes
+					const cleanMessage = { ...m };
+					if (cleanMessage.content === null || cleanMessage.content === undefined) {
+						cleanMessage.content = '';
+					}
+					return cleanMessage;
+				}),
 				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
 				stream,
 				parallel_tool_calls: (!omitTools && cfTools.length > 0) ? false : undefined,
 				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
 			};
 
-			return await ai.run(model, options);
+			console.log(`[customRunWithTools] Calling ai.run with options:`, JSON.stringify({
+				...options,
+				messages: (options.messages as any[]).map(m => ({ role: m.role, contentLength: m.content?.length, keys: Object.keys(m) }))
+			}));
+
+			const result = await ai.run(model, options);
+			console.log(`[customRunWithTools] ai.run returned successfully. Type: ${typeof result}, Keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') : 'none'}`);
+			return result;
 		} catch (e) {
 			console.error(`[customRunWithTools] ai.run failed for model ${model}:`, e);
 			throw e;
