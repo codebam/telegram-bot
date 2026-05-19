@@ -142,6 +142,17 @@ interface AiRunner {
 	run(model: string, inputs: Record<string, unknown>): Promise<AiResponse | ReadableStream | Response>;
 }
 
+function createMockStream(text: string): ReadableStream {
+	const encoder = new TextEncoder();
+	return new ReadableStream({
+		start(controller) {
+			const payload = `data: ${JSON.stringify({ response: text })}\n\ndata: [DONE]\n\n`;
+			controller.enqueue(encoder.encode(payload));
+			controller.close();
+		}
+	});
+}
+
 /**
  * Custom runner that supports tool calls across different AI models.
  */
@@ -378,7 +389,8 @@ export async function customRunWithTools(
 			}
 		} else {
 			if (config.streamFinalResponse) {
-				return (await runModel(messages, true, true)) as ReadableStream;
+				console.log(`[customRunWithTools] Creating mock stream from successful response. Text length: ${responseText.length}`);
+				return createMockStream(responseText);
 			}
 			return aiRes;
 		}
@@ -386,7 +398,15 @@ export async function customRunWithTools(
 	}
 
 	console.log('[customRunWithTools] Maximum turns reached.');
-	return (await runModel(messages, config.streamFinalResponse, true)) as AiResponse | ReadableStream;
+	const finalResponse = await runModel(messages, config.streamFinalResponse, true);
+	if (config.streamFinalResponse && finalResponse instanceof ReadableStream) {
+		return finalResponse;
+	}
+	const finalText = extractText(finalResponse as AiResponse);
+	if (config.streamFinalResponse && finalText) {
+		return createMockStream(finalText);
+	}
+	return finalResponse as AiResponse;
 }
 
 export async function sendMessageDraft(token: string, data: Record<string, unknown>) {
