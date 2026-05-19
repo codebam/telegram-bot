@@ -555,11 +555,11 @@ async function formatTelegramMessage(content: string, thinking?: string, reasoni
 	let message = '';
 	if (thinking) {
 		const sanitizedThinking = sanitizeMarkdownV2(thinking);
-		message += `>**Thinking**\n${sanitizedThinking}\n\n`.split('\n').map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
+		message += `>**Thinking**\n${sanitizedThinking}\n\n`.split('\n').map(line => line.startsWith('\\>') ? line.substring(1) : line).map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
 	}
 	if (reasoning) {
 		const sanitizedReasoning = sanitizeMarkdownV2(reasoning);
-		message += `>**Reasoning**\n${sanitizedReasoning}\n\n`.split('\n').map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
+		message += `>**Reasoning**\n${sanitizedReasoning}\n\n`.split('\n').map(line => line.startsWith('\\>') ? line.substring(1) : line).map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
 	}
 	message += await markdownToMarkdownV2(content);
 	return message;
