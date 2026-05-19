@@ -948,19 +948,18 @@ export default {
 					if (file.file_path) {
 						const fileUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
 						const fileRes = await fetch(fileUrl);
-							if (fileRes.ok) {
-								const arrayBuffer = await fileRes.arrayBuffer();
-								const base64Data = arrayBufferToBase64(arrayBuffer);
-								userMessage.geminiParts = [
-									{ text: task.prompt || 'Please describe this image' },
-									{
-										inlineData: {
-											mimeType: 'image/jpeg',
-											data: base64Data
-										}
+						if (fileRes.ok) {
+							const arrayBuffer = await fileRes.arrayBuffer();
+							const base64Data = arrayBufferToBase64(arrayBuffer);
+							userMessage.geminiParts = [
+								{ text: task.prompt || 'Please describe this image' },
+								{
+									inlineData: {
+										mimeType: 'image/jpeg',
+										data: base64Data
 									}
-								];
-							}
+								}
+							];
 						}
 					}
 				} catch (e) {
