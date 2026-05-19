@@ -9,7 +9,7 @@ import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
 import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
-import { streamAiResponseToTelegram, customRunWithTools, sendMessageDraft } from './lib/ai.js';
+import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
 export { Sandbox } from '@cloudflare/sandbox';
 
@@ -114,11 +114,11 @@ async function chargeStars(
 	const balance = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
 
 	const modelPreference =
-		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'kimi-k2.6';
-	const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['kimi-k2.6'];
+		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'glm-4.7-flash';
+	const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['glm-4.7-flash'];
 
 	if (task.type === 'tool_call' && !modelConfig.supportsTools) {
-		task.modelId = AVAILABLE_MODELS['kimi-k2.6'].id;
+		task.modelId = AVAILABLE_MODELS['glm-4.7-flash'].id;
 	} else if ((task.type === 'photo' || task.geminiParts?.some((p) => p.inlineData)) && !modelConfig.supportsVision) {
 		task.modelId = AVAILABLE_MODELS['google/gemini-3.1-flash-lite'].id;
 	} else {
@@ -262,11 +262,11 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 			const { balance, modelPreference } = await conversation.external(async () => {
 				const b = await getBalance(billingUserId || 0, env.CONVERSATION_HISTORY);
-				const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'kimi-k2.6';
+				const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'glm-4.7-flash';
 				return { balance: b, modelPreference: mp };
 			});
 
-			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['kimi-k2.6'];
+			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['glm-4.7-flash'];
 
 			if (ctx.msg?.document) {
 				const doc = ctx.msg.document;
@@ -433,11 +433,8 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 				'/load <amount> - Top up your balance with Telegram Stars\n' +
 				'/photo <prompt> - Generate an image (100 Stars)\n' +
 				'/model <name> - Switch AI model and see costs\n' +
-				'/ttl <1-5> - Set the TTL for bot-to-bot responses\n' +
-				'/code <prompt> - Generate code snippets\n' +
 				'/prompt <"prompt"> - Set your custom system prompt (use "" or reset to clear)\n' +
 				'/facts <"facts"> - Set facts about yourself for business mode (use "" or reset to clear)\n' +
-				'/request <prompt> - Make arbitrary API requests (uses fetch tool)\n' +
 				'<prompt> - Generate text (may use tools if supported by model)\n' +
 				'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
 				'/clear - Clear your conversation history\n\n' +
@@ -492,25 +489,6 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		await ctx.reply('History cleared');
 	});
 
-	commands.command('code', 'Generate code snippets', async (ctx) => {
-		const prompt = ctx.match;
-		if (prompt) {
-			await chargeStars(ctx, { type: 'code', prompt });
-		}
-	});
-
-	commands.command('ttl', 'Set the TTL for bot-to-bot responses', async (ctx) => {
-		const newTtl = parseInt(ctx.match || '0');
-		const token = ctx.env.SECRET_TELEGRAM_API_TOKEN;
-		if (newTtl >= 1 && newTtl <= 5) {
-			await ctx.env.CONVERSATION_HISTORY.put(`ttl:${token.slice(0, 10)}`, JSON.stringify(newTtl));
-			await ctx.reply(`TTL set to ${newTtl}`);
-		} else {
-			const currentTtl = (await ctx.env.CONVERSATION_HISTORY.get<number>(`ttl:${token.slice(0, 10)}`, 'json')) ?? 2;
-			await ctx.reply(`Invalid TTL. Please use a value between 1 and 5. Current TTL: ${currentTtl}`);
-		}
-	});
-
 	commands.command('model', 'Switch AI model and see costs', async (ctx) => {
 		const modelKey = `model:${String(ctx.from?.id)}`;
 		const selectedModel = ctx.match?.toLowerCase();
@@ -522,7 +500,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 				await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
 			}
 		} else {
-			const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'kimi-k2.6';
+			const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'glm-4.7-flash';
 			await ctx.reply(
 				`Current model: <b>${currentModel}</b>\n\n` +
 					`Available models:\n` +
@@ -600,34 +578,6 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			}
 			await ctx.reply(`Business facts updated to:\n\n${factsValue}`);
 		}
-	});
-
-	commands.command('request', 'Make arbitrary API requests', async (ctx) => {
-		const prompt = ctx.match;
-		if (!prompt) {
-			await ctx.reply('Please provide a request. Example: /request what is the weather in San Francisco?');
-			return;
-		}
-		await chargeStars(ctx, {
-			type: 'tool_call',
-			prompt,
-			tools: [fetchTool, wikipediaTool, createSandboxTool(ctx.env.Sandbox, String(ctx.from?.id))],
-		});
-	});
-
-	commands.command('stream', 'Stream incrementing numbers', async (ctx) => {
-		const chatId = ctx.chatId;
-		if (!chatId) return;
-
-		await ctx.env.STREAM_WORKFLOW.create({
-			params: {
-				type: 'code',
-				prompt: '/stream',
-				chatId: String(chatId),
-				updateId: Date.now(),
-				businessConnectionId: ctx.update.business_message?.business_connection_id,
-			},
-		});
 	});
 
 	bot.use(commands);
@@ -783,11 +733,8 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 							'/load <amount> - Top up your balance with Telegram Stars\n' +
 							'/photo <prompt> - Generate an image (100 Stars)\n' +
 							'/model <name> - Switch AI model and see costs\n' +
-							'/ttl <1-5> - Set the TTL for bot-to-bot responses\n' +
-							'/code <prompt> - Generate code snippets\n' +
 							'/prompt <"prompt"> - Set your custom system prompt (use "" or reset to clear)\n' +
 							'/facts <"facts"> - Set facts about yourself for business mode (use "" or reset to clear)\n' +
-							'/request <prompt> - Make arbitrary API requests (uses fetch tool)\n' +
 							'<prompt> - Generate text (may use tools if supported by model)\n' +
 							'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
 							'/clear - Clear your conversation history\n\n' +
@@ -957,43 +904,11 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 			task.type === 'tool_call' ||
 			task.type === 'photo' ||
 			task.type === 'voice' ||
-			task.type === 'gen_photo' ||
-			task.type === 'code'
+			task.type === 'gen_photo'
 		) {
-			if (task.type === 'code' && task.prompt === '/stream') {
-				const draftId = task.updateId || Date.now();
-				for (let i = 1; i <= 20; i++) {
-					await step.do(`step ${i}`, async () => {
-						const api = new Bot<MyContext>(this.env.SECRET_TELEGRAM_API_TOKEN).api;
-						if (i === 20) {
-							await sendMessageDraft(api, {
-								chat_id: task.chatId,
-								text: i.toString(),
-								draft_id: draftId,
-								business_connection_id: task.businessConnectionId,
-								finish: true,
-							});
-							await api.sendMessage(task.chatId!, i.toString(), {
-								business_connection_id: task.businessConnectionId,
-							});
-						} else {
-							await sendMessageDraft(api, {
-								chat_id: task.chatId,
-								text: i.toString(),
-								draft_id: draftId,
-								business_connection_id: task.businessConnectionId,
-							});
-						}
-					});
-					if (i < 20) {
-						await step.sleep(`sleep ${i}`, '2 seconds');
-					}
-				}
-			} else {
-				await step.do('process task', async () => {
-					await processTask(task, this.env);
-				});
-			}
+			await step.do('process task', async () => {
+				await processTask(task, this.env);
+			});
 		}
 	}
 }

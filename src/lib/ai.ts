@@ -628,12 +628,13 @@ async function formatTelegramMessage(content: string, thinking?: string, reasoni
 	if (thinking) {
 		const trimmedThinking = thinking.trim().replace(/\n\n$/, '\n');
 		const sanitizedThinking = sanitizeMarkdownV2(trimmedThinking);
-		// For blockquotes in MarkdownV2, the '>' must NOT be escaped, but the content must be.
-		message += sanitizedThinking.split('\n').map(line => `>${line}`).join('\n') + '\n\n';
+		// For blockquotes in MarkdownV2, each line must start with '>'. 
+		// We ensure there is a space after '>' for better compatibility and to avoid parsing issues.
+		message += sanitizedThinking.split('\n').map(line => `> ${line}`).join('\n') + '\n\n';
 	}
 	if (reasoning) {
 		const sanitizedReasoning = sanitizeMarkdownV2(reasoning.trim());
-		message += `*${sanitizeMarkdownV2('Reasoning')}*\n${sanitizedReasoning}\n\n`;
+		message += sanitizedReasoning.split('\n').map(line => `> ${line}`).join('\n') + '\n\n';
 	}
 	if (skipMarkdown) {
 		message += sanitizeMarkdownV2(content);
@@ -661,7 +662,7 @@ export async function streamAiResponseToTelegram(
 	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
 		await sendMessageDraft(ctx.api, {
 			chat_id: task.chatId,
-			text: '>Thinking',
+			text: '> Thinking',
 			parse_mode: 'MarkdownV2',
 			message_thread_id: task.threadId,
 			business_connection_id: task.businessConnectionId,
@@ -695,7 +696,7 @@ export async function streamAiResponseToTelegram(
 			) {
 				const text = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
 					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''), true)
-					: (hasSeenReasoning ? '>Reasoning' : '>Thinking');
+					: (hasSeenReasoning ? '> Reasoning' : '> Thinking');
 
 				await sendMessageDraft(ctx.api, {
 					chat_id: task.chatId,
