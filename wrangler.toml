@@ -2,6 +2,7 @@ name = "tux-robot"
 main = "src/index.ts"
 compatibility_flags = [ "nodejs_compat" ]
 compatibility_date = "2025-06-04"
+max_duration = 45
 
 [ai]
 binding = "AI"
@@ -41,6 +42,7 @@ tag = "v1"
 
 [env.dev]
 name = "tux-robot-dev"
+max_duration = 45
 
 [env.dev.ai]
 binding = "AI"
@@ -76,6 +78,7 @@ name = "Sandbox"
 
 [env.production]
 name = "tux-robot"
+max_duration = 45
 
 [env.production.ai]
 binding = "AI"
