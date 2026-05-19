@@ -71,24 +71,40 @@ def process_file(file_path, supports_vision):
     
     if ext == '.pdf':
         try:
-            import fitz
+            import pypdf
         except ImportError:
             import subprocess
-            subprocess.run([sys.executable, "-m", "pip", "install", "pymupdf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            import fitz
+            subprocess.run([sys.executable, "-m", "pip", "install", "pypdf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import pypdf
         try:
-            doc = fitz.open(file_path)
+            reader = pypdf.PdfReader(file_path)
             text_list = []
-            for i, page in enumerate(doc):
-                text_list.append(f"--- Page {i+1} ---\\n" + page.get_text())
+            for i, page in enumerate(reader.pages):
+                text_list.append(f"--- Page {i+1} ---\\n" + (page.extract_text() or ""))
             result["text"] = "\\n".join(text_list)
             
             if supports_vision:
-                for page in doc[:5]:
-                    pix = page.get_pixmap()
-                    img_data = pix.tobytes("jpg")
-                    base64_data = base64.b64encode(img_data).decode("utf-8")
-                    result["images"].append(base64_data)
+                try:
+                    import subprocess
+                    subprocess.run(["pdftoppm", "-jpeg", "-f", "1", "-l", "5", "-r", "150", file_path, "/tmp/page"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    for i in range(1, 6):
+                        img_path = f"/tmp/page-{i}.jpg"
+                        if os.path.exists(img_path):
+                            with open(img_path, "rb") as img_file:
+                                result["images"].append(base64.b64encode(img_file.read()).decode("utf-8"))
+                except Exception:
+                    try:
+                        import fitz
+                    except ImportError:
+                        import subprocess
+                        subprocess.run([sys.executable, "-m", "pip", "install", "pymupdf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        import fitz
+                    doc = fitz.open(file_path)
+                    for page in doc[:5]:
+                        pix = page.get_pixmap()
+                        img_data = pix.tobytes("jpg")
+                        base64_data = base64.b64encode(img_data).decode("utf-8")
+                        result["images"].append(base64_data)
         except Exception as e:
             result["text"] = f"Error parsing PDF: {str(e)}"
             
