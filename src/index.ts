@@ -308,6 +308,8 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 					await ctx.reply(
 						`⚠️ Your current model (<b>${modelPreference}</b>) does not support vision/images.\n\n` +
 							`Please switch to a vision-enabled model using:\n` +
+							`- <code>/model glm-4.7-flash</code> (10 Stars)\n` +
+							`- <code>/model gemma4</code> (10 Stars)\n` +
 							`- <code>/model google/gemini-3.1-flash-lite</code> (10 Stars)\n` +
 							`- <code>/model llama-3.2-vision</code> (10 Stars)\n` +
 							`- <code>/model google/gemini-3.1-pro</code> (80 Stars)`,
