@@ -1,5 +1,5 @@
 import type { Api } from 'grammy';
-import type { MessageDraftPiece, StreamContextExtension } from '@grammyjs/stream';
+import type { StreamContextExtension } from '@grammyjs/stream';
 import {
 	markdownToMarkdownV2,
 	AVAILABLE_MODELS,
@@ -46,6 +46,7 @@ export function createThinkFilter() {
 						current = current.slice(closeIdx + closeMatch[0].length);
 						inside = false;
 					} else {
+						buffer = current;
 						return '';
 					}
 				} else {
@@ -591,102 +592,62 @@ export async function streamAiResponseToTelegram(
 	let reasoningContent = '';
 	let hasSeenReasoning = false;
 
-	if (ctx.replyWithStream && task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
-		console.log('[streamAiResponseToTelegram] Using ctx.replyWithStream');
-		const iterator = getAiStream(ai, modelId, messages, tools, (status) => {
-			if (status === 'Reasoning') hasSeenReasoning = true;
-		});
-		let lastDraftUpdate = Date.now();
-
-		async function* streamWithMetadata(): AsyncIterable<MessageDraftPiece> {
-			for await (const chunk of iterator) {
-				if (chunk.type === 'thinking') {
-					thinkingContent += chunk.text;
-				} else if (chunk.type === 'reasoning') {
-					reasoningContent += chunk.text;
-					hasSeenReasoning = true;
-				} else {
-					streamContent += chunk.text;
-				}
-				yield (chunk.text || '') as MessageDraftPiece;
-
-				const now = Date.now();
-				if (now - lastDraftUpdate > 2000) {
-					const text = (streamContent || reasoningContent || thinkingContent)
-						? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''))
-						: (hasSeenReasoning ? '>Reasoning' : '>Thinking');
-						
-					await sendMessageDraft(token, {
-						chat_id: task.chatId,
-						text,
-						parse_mode: 'MarkdownV2',
-						message_thread_id: task.threadId,
-						business_connection_id: task.businessConnectionId,
-						draft_id: draftId,
-					});
-					lastDraftUpdate = now;
-				}
-			}
-		}
-		await ctx.replyWithStream(
-			streamWithMetadata(),
-			{
-				parse_mode: 'MarkdownV2',
-				message_thread_id: task.threadId,
-			},
-			{
-				parse_mode: 'MarkdownV2',
-				message_thread_id: task.threadId,
-				business_connection_id: task.businessConnectionId,
-				reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
-			}
-		);
-
-		await sendMessageDraft(token, {
-			chat_id: task.chatId,
-			text: await formatTelegramMessage(streamContent, thinkingContent, reasoningContent),
-			parse_mode: 'MarkdownV2',
-			message_thread_id: task.threadId,
-			business_connection_id: task.businessConnectionId,
-			draft_id: draftId,
-			finish: true,
-		});
-	} else {
-		console.log('[streamAiResponseToTelegram] Using getAiStream fallback');
-		const lastUpdate = { time: Date.now() };
+	let messageId: number | undefined;
+	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message' && task.chatId) {
 		try {
-			for await (const chunk of getAiStream(ai, modelId, messages, tools)) {
-				if (chunk.type === 'thinking') {
-					thinkingContent += chunk.text;
-				} else if (chunk.type === 'reasoning') {
-					reasoningContent += chunk.text;
-					hasSeenReasoning = true;
-				} else {
-					streamContent += chunk.text;
-				}
-				if (
-					task.updateType !== 'guest_message' &&
-					task.updateType !== 'business_message' &&
-					Date.now() - lastUpdate.time > 2000
-				) {
-					const text = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
-						? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''))
-						: (hasSeenReasoning ? '>Reasoning' : '>Thinking');
-
-					await sendMessageDraft(token, {
-						chat_id: task.chatId,
-						text,
-						parse_mode: 'MarkdownV2',
-						message_thread_id: task.threadId,
-						business_connection_id: task.businessConnectionId,
-						draft_id: draftId,
-					});
-					lastUpdate.time = Date.now();
-				}
-			}
+			const initMsg = await ctx.api.sendMessage(task.chatId, '>Thinking', {
+				parse_mode: 'MarkdownV2',
+				message_thread_id: task.threadId,
+				reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+			});
+			messageId = initMsg.message_id;
 		} catch (e) {
-			console.error('[streamAiResponseToTelegram] Error during AI streaming:', e);
+			console.log('[streamAiResponseToTelegram] Error sending initial message:', e);
 		}
+	}
+
+	const lastUpdate = { time: Date.now() };
+	try {
+		for await (const chunk of getAiStream(ai, modelId, messages, tools, (status) => {
+			if (status === 'Reasoning') hasSeenReasoning = true;
+		})) {
+			if (chunk.type === 'thinking') {
+				thinkingContent += chunk.text;
+			} else if (chunk.type === 'reasoning') {
+				reasoningContent += chunk.text;
+				hasSeenReasoning = true;
+			} else {
+				streamContent += chunk.text;
+			}
+			if (
+				task.updateType !== 'guest_message' &&
+				task.updateType !== 'business_message' &&
+				Date.now() - lastUpdate.time > 2000
+			) {
+				const text = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
+					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''))
+					: (hasSeenReasoning ? '>Reasoning' : '>Thinking');
+
+				if (messageId && task.chatId) {
+					await ctx.api.editMessageText(task.chatId, messageId, text, {
+						parse_mode: 'MarkdownV2',
+					}).catch(e => console.log('Edit error:', e));
+				}
+
+				await sendMessageDraft(token, {
+					chat_id: task.chatId,
+					text,
+					parse_mode: 'MarkdownV2',
+					message_thread_id: task.threadId,
+					business_connection_id: task.businessConnectionId,
+					draft_id: draftId,
+				});
+				lastUpdate.time = Date.now();
+			}
+		}
+	} catch (e) {
+		console.error('[streamAiResponseToTelegram] Error during AI streaming:', e);
+	}
 		console.log(`[streamAiResponseToTelegram] Stream finished. Content length: ${streamContent.length}`);
 
 		const TEXT_LIMIT = 3800;
@@ -725,7 +686,7 @@ export async function streamAiResponseToTelegram(
 					})
 					.catch((e: unknown) => console.log('Error sending final business message:', e));
 			} else {
-				console.log('[streamAiResponseToTelegram] Sending final sendMessageDraft and sendMessage');
+				console.log('[streamAiResponseToTelegram] Sending final sendMessageDraft and edit/sendMessage');
 				await sendMessageDraft(token, {
 					chat_id: task.chatId,
 					text: finalMessage,
@@ -735,16 +696,20 @@ export async function streamAiResponseToTelegram(
 					draft_id: draftId,
 					finish: true,
 				});
-				await ctx.api
-					.sendMessage(task.chatId!, finalMessage, {
+				if (messageId && task.chatId) {
+					await ctx.api.editMessageText(task.chatId, messageId, finalMessage, {
+						parse_mode: 'MarkdownV2',
+					}).catch((e: unknown) => console.log('Error editing final message:', e));
+				} else if (task.chatId) {
+					await ctx.api.sendMessage(task.chatId, finalMessage, {
 						parse_mode: 'MarkdownV2',
 						message_thread_id: task.threadId,
 						business_connection_id: task.businessConnectionId,
-						reply_to_message_id: task.messageId,
-					})
-					.catch((e: unknown) => console.log('Error sending final message:', e));
+						reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+					}).catch((e: unknown) => console.log('Error sending final message:', e));
+				}
 			}
 		}
-	}
+
 	return streamContent;
 }
