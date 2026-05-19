@@ -579,11 +579,12 @@ async function formatTelegramMessage(content: string, thinking?: string, reasoni
 	if (thinking) {
 		const trimmedThinking = thinking.trim().replace(/\n\n$/, '\n');
 		const sanitizedThinking = sanitizeMarkdownV2(trimmedThinking);
-		message += `>**Thinking**\n${sanitizedThinking}`.split('\n').map(line => line.startsWith('\\>') ? line.substring(1) : line).map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n\n';
+		// For blockquotes in MarkdownV2, the '>' must NOT be escaped, but the content must be.
+		message += sanitizedThinking.split('\n').map(line => `>${line}`).join('\n') + '\n\n';
 	}
 	if (reasoning) {
 		const sanitizedReasoning = sanitizeMarkdownV2(reasoning.trim());
-		message += `*Reasoning*\n${sanitizedReasoning}\n\n`;
+		message += `*${sanitizeMarkdownV2('Reasoning')}*\n${sanitizedReasoning}\n\n`;
 	}
 	if (skipMarkdown) {
 		message += sanitizeMarkdownV2(content);
