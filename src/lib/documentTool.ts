@@ -57,7 +57,19 @@ export const createTelegramFileReaderTool = (
 				const sandbox = getSandbox(sandboxBinding, userId);
 				const safeFileName = file_name.replace(/[^a-zA-Z0-9.-]/g, '_');
 				const sandboxPath = `/workspace/${safeFileName}`;
-				await sandbox.writeFile(sandboxPath, base64Content, { encoding: 'base64' });
+				
+				let retries = 3;
+				while (retries > 0) {
+					try {
+						await sandbox.writeFile(sandboxPath, base64Content, { encoding: 'base64' });
+						break;
+					} catch (err) {
+						retries--;
+						console.warn(`[read_telegram_file] writeFile failed. Retries left: ${retries}. Error:`, err);
+						if (retries === 0) throw err;
+						await new Promise((resolve) => setTimeout(resolve, 2000));
+					}
+				}
 
 				const pythonCode = `
 import sys
