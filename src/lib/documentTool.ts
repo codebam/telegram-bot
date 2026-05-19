@@ -58,7 +58,7 @@ export async function parseTelegramFile(
 	file_name: string,
 	_supportsVision: boolean,
 	_messages?: ChatMessage[],
-	limit = 2000
+	limit = 20000
 ): Promise<string> {
 	try {
 		console.log(`[parseTelegramFile] Native JS parsing triggered for FileID: ${file_id}, Name: ${file_name}, Limit: ${limit}`);
