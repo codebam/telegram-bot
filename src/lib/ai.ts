@@ -193,7 +193,7 @@ export async function customRunWithTools(
 						return { role, parts };
 					}),
 					tools: (!omitTools && cfTools.length > 0) ? [{ functionDeclarations: cfTools }] : undefined,
-					generationConfig: { maxOutputTokens: 8192 },
+					generationConfig: { maxOutputTokens: 65536 },
 					stream,
 				};
 				if (systemMessage?.content) {
@@ -219,7 +219,7 @@ export async function customRunWithTools(
 				}),
 				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
 				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
-				max_completion_tokens: 8192,
+				max_completion_tokens: 65536,
 				stream,
 			};
 
