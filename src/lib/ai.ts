@@ -1,4 +1,3 @@
-import type { ParseMode } from '@grammyjs/types';
 import type { Api } from 'grammy';
 import type { MessageDraftPiece, StreamContextExtension } from '@grammyjs/stream';
 import {
