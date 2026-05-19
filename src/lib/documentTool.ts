@@ -42,7 +42,7 @@ export const createTelegramFileReaderTool = (
 					return `Error: Failed to download file from Telegram. Status: ${downloadRes.status}`;
 				}
 
-				const sandbox = getSandbox(sandboxBinding, userId);
+				const sandbox = getSandbox(sandboxBinding, userId, { transport: 'rpc' });
 				const safeFileName = file_name.replace(/[^a-zA-Z0-9.-]/g, '_');
 				const sandboxPath = `/workspace/${safeFileName}`;
 				await sandbox.writeFile(sandboxPath, downloadRes.body);
