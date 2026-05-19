@@ -180,15 +180,11 @@ export async function customRunWithTools(
 
 					for (const part of m.geminiParts) {
 						if (part.inlineData) {
-							const binaryString = atob(part.inlineData.data);
-							const len = binaryString.length;
-							const bytes = new Uint8Array(len);
-							for (let i = 0; i < len; i++) {
-								bytes[i] = binaryString.charCodeAt(i);
-							}
 							contentParts.push({
-								type: 'image',
-								image: Array.from(bytes)
+								type: 'image_url',
+								image_url: {
+									url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`
+								}
 							});
 						}
 					}
