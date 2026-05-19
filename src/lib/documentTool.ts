@@ -2,6 +2,27 @@ import { getDocumentProxy, extractText } from 'unpdf';
 import JSZip from 'jszip';
 import { AVAILABLE_MODELS, type ChatMessage } from '@codebam/shared';
 
+function extractPrintableStrings(buffer: ArrayBuffer): string {
+	const bytes = new Uint8Array(buffer);
+	let result = '';
+	let currentString = '';
+	for (let i = 0; i < bytes.length; i++) {
+		const byte = bytes[i];
+		if ((byte >= 32 && byte <= 126) || byte === 10 || byte === 13 || byte === 9) {
+			currentString += String.fromCharCode(byte);
+		} else {
+			if (currentString.length >= 4) {
+				result += currentString + ' ';
+			}
+			currentString = '';
+		}
+	}
+	if (currentString.length >= 4) {
+		result += currentString;
+	}
+	return result.replace(/\s+/g, ' ').trim();
+}
+
 export async function parseTelegramFile(
 	telegramToken: string,
 	_sandboxBinding: unknown, // keeping for signature compatibility
@@ -45,50 +66,69 @@ export async function parseTelegramFile(
 			return text || 'PDF parsed successfully but no text content found.';
 		}
 		
-		if (ext === '.docx') {
-			console.log(`[parseTelegramFile] Parsing DOCX via JSZip...`);
-			const zip = await JSZip.loadAsync(arrayBuffer);
-			const documentXml = await zip.file('word/document.xml')?.async('text');
-			if (!documentXml) {
-				return 'Error: word/document.xml not found in DOCX zip.';
+		if (ext === '.docx' || ext === '.doc') {
+			console.log(`[parseTelegramFile] Parsing DOCX/DOC via JSZip...`);
+			try {
+				const zip = await JSZip.loadAsync(arrayBuffer);
+				const documentXml = await zip.file('word/document.xml')?.async('text');
+				if (!documentXml) {
+					return 'Error: word/document.xml not found in DOCX zip.';
+				}
+				const matches = documentXml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
+				const text = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
+				console.log(`[parseTelegramFile] DOCX/DOC parsed successfully via JSZip. Text Length: ${text.length}`);
+				return text.trim() || 'DOCX/DOC parsed successfully but no text content found.';
+			} catch (e) {
+				console.log(`[parseTelegramFile] JSZip failed for DOCX/DOC. Falling back to legacy binary string extraction...`);
+				const text = extractPrintableStrings(arrayBuffer);
+				return text || 'DOC/DOCX parsed but no text content found.';
 			}
-			const matches = documentXml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
-			const text = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
-			console.log(`[parseTelegramFile] DOCX parsed successfully. Text Length: ${text.length}`);
-			return text.trim() || 'DOCX parsed successfully but no text content found.';
 		}
 
-		if (ext === '.pptx') {
-			console.log(`[parseTelegramFile] Parsing PPTX via JSZip...`);
-			const zip = await JSZip.loadAsync(arrayBuffer);
-			const slideTexts: string[] = [];
-			const files = Object.keys(zip.files).filter(name => name.startsWith('ppt/slides/slide') && name.endsWith('.xml'));
-			files.sort((a, b) => {
-				const numA = parseInt(a.replace(/[^0-9]/g, ''), 10);
-				const numB = parseInt(b.replace(/[^0-9]/g, ''), 10);
-				return numA - numB;
-			});
+		if (ext === '.pptx' || ext === '.ppt') {
+			console.log(`[parseTelegramFile] Parsing PPTX/PPT via JSZip...`);
+			try {
+				const zip = await JSZip.loadAsync(arrayBuffer);
+				const slideTexts: string[] = [];
+				const files = Object.keys(zip.files).filter(name => name.startsWith('ppt/slides/slide') && name.endsWith('.xml'));
+				files.sort((a, b) => {
+					const numA = parseInt(a.replace(/[^0-9]/g, ''), 10);
+					const numB = parseInt(b.replace(/[^0-9]/g, ''), 10);
+					return numA - numB;
+				});
 
-			for (const file of files) {
-				const slideXml = await zip.file(file)?.async('text');
-				if (slideXml) {
-					const slideNum = file.replace(/[^0-9]/g, '');
-					const matches = slideXml.match(/<a:t[^>]*>([^<]*)<\/a:t>/g) || [];
-					const text = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
-					if (text.trim()) {
-						slideTexts.push(`--- Slide ${slideNum} ---\n${text.trim()}`);
+				for (const file of files) {
+					const slideXml = await zip.file(file)?.async('text');
+					if (slideXml) {
+						const slideNum = file.replace(/[^0-9]/g, '');
+						const matches = slideXml.match(/<a:t[^>]*>([^<]*)<\/a:t>/g) || [];
+						const text = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
+						if (text.trim()) {
+							slideTexts.push(`--- Slide ${slideNum} ---\n${text.trim()}`);
+						}
 					}
 				}
+				console.log(`[parseTelegramFile] PPTX/PPT parsed successfully via JSZip. Total slides parsed: ${slideTexts.length}`);
+				return slideTexts.join('\n\n') || 'PPTX/PPT parsed successfully but no text content found.';
+			} catch (e) {
+				console.log(`[parseTelegramFile] JSZip failed for PPTX/PPT. Falling back to legacy binary string extraction...`);
+				const text = extractPrintableStrings(arrayBuffer);
+				return text || 'PPT/PPTX parsed but no text content found.';
 			}
-			console.log(`[parseTelegramFile] PPTX parsed successfully. Total slides parsed: ${slideTexts.length}`);
-			return slideTexts.join('\n\n') || 'PPTX parsed successfully but no text content found.';
 		}
 
-		// Fallback for all other text files (txt, md, js, json, csv, etc.)
-		console.log(`[parseTelegramFile] Reading file as plain text...`);
+		if (ext === '.txt' || ext === '.md' || ext === '.markdown') {
+			console.log(`[parseTelegramFile] Parsing TXT/MD file...`);
+			const decoder = new TextDecoder('utf-8');
+			const text = decoder.decode(arrayBuffer);
+			return text || 'TXT/MD file is empty.';
+		}
+
+		// Fallback for all other files
+		console.log(`[parseTelegramFile] Reading file as plain text fallback...`);
 		const decoder = new TextDecoder('utf-8');
 		const text = decoder.decode(arrayBuffer);
-		return text || 'Text file is empty.';
+		return text || 'File is empty.';
 
 	} catch (e) {
 		console.error(`[parseTelegramFile] Unexpected error:`, e);
@@ -108,7 +148,7 @@ export const createTelegramFileReaderTool = (
 
 	return {
 		name: 'read_telegram_file',
-		description: 'Read the contents of a Telegram file (such as PDF, DOCX, PPTX, or text files) given its file_id and file_name.',
+		description: 'Read the contents of a Telegram file (such as PDF, DOC, DOCX, PPT, PPTX, TXT, or MD/Markdown files) given its file_id and file_name.',
 		parameters: {
 			type: 'object',
 			properties: {
