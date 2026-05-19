@@ -7,7 +7,7 @@ import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
 import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
-import { createTelegramFileReaderTool, parseTelegramFile } from './lib/documentTool.js';
+import { createTelegramFileReaderTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
 export { Sandbox } from '@cloudflare/sandbox';
@@ -286,36 +286,15 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 			if (ctx.message?.document) {
 				const doc = ctx.message.document;
-				console.log(`[chatConversation] Direct document parsing triggered for file: ${doc.file_name}`);
-				const parsedText = await conversation.external(() =>
-					parseTelegramFile(
-						env.SECRET_TELEGRAM_API_TOKEN,
-						env.Sandbox,
-						String(userId),
-						doc.file_id,
-						doc.file_name || 'document',
-						modelConfig.supportsVision || false
-					)
-				);
-				prompt = `[Content of Uploaded Document "${doc.file_name || 'document'}":]\n${parsedText}\n\nUser request: ${prompt || 'Please process this document.'}`;
+				prompt = `[Uploaded Document: Name="${doc.file_name || 'document'}", MIME="${doc.mime_type || ''}", FileID="${doc.file_id}"]\n\n${prompt || 'Please process this document.'}`;
 			}
 
 			const replyToMessage = ctx.message?.reply_to_message || ctx.update.business_message?.reply_to_message;
 			if (replyToMessage) {
 				if (replyToMessage.document) {
 					const replyDoc = replyToMessage.document;
-					console.log(`[chatConversation] Direct reply document parsing triggered for file: ${replyDoc.file_name}`);
-					const parsedText = await conversation.external(() =>
-						parseTelegramFile(
-							env.SECRET_TELEGRAM_API_TOKEN,
-							env.Sandbox,
-							String(userId),
-							replyDoc.file_id,
-							replyDoc.file_name || 'document',
-							modelConfig.supportsVision || false
-						)
-					);
-					prompt = `[Content of Uploaded Document "${replyDoc.file_name || 'document'}" I am replying to:]\n${parsedText}\n\nMy message: ${prompt}`;
+					const replyText = replyToMessage.caption || '';
+					prompt = `Context of the uploaded document I am replying to: Name="${replyDoc.file_name || 'document'}", MIME="${replyDoc.mime_type || ''}", FileID="${replyDoc.file_id}"${replyText ? ` with caption "${replyText}"` : ''}\n\nMy message: ${prompt}`;
 				} else {
 					const replyText = replyToMessage.text || replyToMessage.caption || '';
 					if (replyText) {
