@@ -1,0 +1,6 @@
+node_modules
+.wrangler
+.git
+.github
+worker-configuration.d.ts
+*.md
