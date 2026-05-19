@@ -126,9 +126,9 @@ export const createTavilySearchTool = (apiKey: string) => ({
 	},
 });
 
-import { getSandbox } from '@cloudflare/sandbox';
+import { getSandbox, type Sandbox } from '@cloudflare/sandbox';
 
-export const createSandboxTool = (sandboxBinding: any, userId: string) => ({
+export const createSandboxTool = (sandboxBinding: DurableObjectNamespace<Sandbox>, userId: string) => ({
 	name: 'code_interpreter',
 	description:
 		'Execute Python code in a secure sandbox environment. Use this tool for complex calculations, data processing, or running code snippets. The environment has internet access and common libraries (numpy, pandas, matplotlib) installed. Pass multi-line Python source as the `code` argument — do NOT wrap it in shell or `python -c`.',

@@ -1,5 +1,16 @@
-import { ParseMode } from '@grammyjs/types';
-import { markdownToHtml, type AiResponse, type Tool, type Task } from '@codebam/shared';
+import type { ParseMode } from '@grammyjs/types';
+import type { Api } from 'grammy';
+import type { MessageDraftPiece, StreamContextExtension } from '@grammyjs/stream';
+import {
+	markdownToHtml,
+	type AiResponse,
+	type ChatMessage,
+	type GeminiPart,
+	type NormalizedToolCall,
+	type RawToolCall,
+	type Task,
+	type Tool,
+} from '@codebam/shared';
 
 const THINK_TAGS = ['think', 'thinking', 'reasoning', 'reflection', 'thought', 'analysis'];
 const THINK_OPEN_RE = new RegExp(`<(?:${THINK_TAGS.join('|')})(?:\\s[^>]*)?>`, 'i');
@@ -86,10 +97,12 @@ export function createThinkFilter() {
 	};
 }
 
+type ExtractInput = string | AiResponse | Record<string, unknown> | null | undefined;
+
 /**
  * Robustly extract text from various AI response formats.
  */
-export function extractText(obj: string | AiResponse | any): string {
+export function extractText(obj: ExtractInput): string {
 	if (typeof obj === 'string') {
 		return obj;
 	}
@@ -97,24 +110,24 @@ export function extractText(obj: string | AiResponse | any): string {
 		return '';
 	}
 
-	const response = obj as any;
+	const response = obj as Record<string, unknown>;
 
 	if (typeof response.response === 'string') return response.response;
 	if (typeof response.text === 'string') return response.text;
 	if (typeof response.content === 'string') return response.content;
 	if (typeof response.delta === 'string') return response.delta;
 
-	if (response.choices && Array.isArray(response.choices) && response.choices.length > 0)
-		return extractText(response.choices[0]);
-	if (response.message) return extractText(response.message);
-	if (response.delta) return extractText(response.delta);
+	if (Array.isArray(response.choices) && response.choices.length > 0)
+		return extractText(response.choices[0] as ExtractInput);
+	if (response.message) return extractText(response.message as ExtractInput);
+	if (response.delta) return extractText(response.delta as ExtractInput);
 	if (response.tool_calls) return ''; // Skip tool calls in extraction
-	if (response.candidates && Array.isArray(response.candidates) && response.candidates.length > 0)
-		return extractText(response.candidates[0]);
-	if (response.content) return extractText(response.content);
-	if (response.parts && Array.isArray(response.parts) && response.parts.length > 0) {
+	if (Array.isArray(response.candidates) && response.candidates.length > 0)
+		return extractText(response.candidates[0] as ExtractInput);
+	if (response.content) return extractText(response.content as ExtractInput);
+	if (Array.isArray(response.parts) && response.parts.length > 0) {
 		let text = '';
-		for (const part of response.parts) {
+		for (const part of response.parts as GeminiPart[]) {
 			if (part.thought) continue; // Gemini thinking parts
 			if (part.text) text += part.text;
 		}
@@ -124,27 +137,31 @@ export function extractText(obj: string | AiResponse | any): string {
 	return '';
 }
 
+interface AiRunner {
+	run(model: string, inputs: Record<string, unknown>): Promise<AiResponse | ReadableStream | Response>;
+}
+
 /**
  * Custom runner that supports tool calls across different AI models.
  */
 export async function customRunWithTools(
-	ai: any,
+	ai: AiRunner,
 	model: string,
-	input: { messages: any[]; tools?: Tool[] },
+	input: { messages: ChatMessage[]; tools?: Tool[] },
 	config: { streamFinalResponse: boolean }
 ): Promise<AiResponse | ReadableStream> {
 	console.log(`[customRunWithTools] Model: ${model}, Tools: ${input.tools?.length || 0}, Stream: ${config.streamFinalResponse}`);
-	const messages = [...input.messages];
+	const messages: ChatMessage[] = [...input.messages];
 	const tools = input.tools || [];
 	const isGemini = model.includes('google/gemini');
 
-	const cfTools = tools.map((t: Tool) => ({
+	const cfTools = tools.map((t) => ({
 		name: t.name,
 		description: t.description,
-		parameters: t.parameters
+		parameters: t.parameters,
 	}));
 
-	const runModel = async (msgs: any[], stream: boolean) => {
+	const runModel = async (msgs: ChatMessage[], stream: boolean) => {
 		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}`);
 		try {
 			if (isGemini) {
@@ -156,39 +173,35 @@ export async function customRunWithTools(
 						if (m.geminiParts) {
 							return {
 								role: m.role === 'assistant' ? 'model' : 'user',
-								parts: m.geminiParts
+								parts: m.geminiParts,
 							};
 						}
-						
-						let role = m.role === 'assistant' ? 'model' : 'user';
-						const parts: any[] = [];
+
+						const role = m.role === 'assistant' ? 'model' : 'user';
+						const parts: GeminiPart[] = [];
 						if (m.content) parts.push({ text: m.content });
 						return { role, parts };
 					}),
-					tools: cfTools.length > 0 ? [{
-						functionDeclarations: cfTools
-					}] : undefined,
-					stream
+					tools: cfTools.length > 0 ? [{ functionDeclarations: cfTools }] : undefined,
+					stream,
 				};
-				if (systemMessage) {
+				if (systemMessage?.content) {
 					geminiInput.system_instruction = {
-						parts: [{ text: systemMessage.content as string }]
+						parts: [{ text: systemMessage.content }],
 					};
 				}
-				const res = await ai.run(model, geminiInput);
-				return res;
+				return await ai.run(model, geminiInput);
 			}
-			
-			const options: any = {
+
+			const options: Record<string, unknown> = {
 				messages: msgs,
-				tools: cfTools.length > 0 ? cfTools.map(t => ({ type: 'function', function: t })) : undefined,
+				tools: cfTools.length > 0 ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
 				stream,
 				parallel_tool_calls: false,
-				tool_choice: 'auto'
+				tool_choice: 'auto',
 			};
 
-			const res = await ai.run(model, options);
-			return res;
+			return await ai.run(model, options);
 		} catch (e) {
 			console.error(`[customRunWithTools] ai.run failed for model ${model}:`, e);
 			throw e;
@@ -199,14 +212,14 @@ export async function customRunWithTools(
 	while (turn < 5) {
 		const shouldStream = turn === 4 || cfTools.length === 0 ? config.streamFinalResponse : false;
 		const response = await runModel(messages, shouldStream);
-		
+
 		if (shouldStream || response instanceof ReadableStream) {
-			return response;
+			return response as ReadableStream;
 		}
 
 		const aiRes = response as AiResponse;
-		let toolCalls: any[] = [];
-		let geminiParts: any[] = [];
+		let toolCalls: RawToolCall[] = [];
+		let geminiParts: GeminiPart[] = [];
 
 		if (aiRes?.tool_calls) {
 			toolCalls = [...aiRes.tool_calls];
@@ -215,26 +228,26 @@ export async function customRunWithTools(
 		} else if (isGemini && aiRes?.candidates?.[0]?.content?.parts) {
 			geminiParts = aiRes.candidates[0].content.parts;
 			// Extract Gemini function calls
-			for (const part of geminiParts as any[]) {
+			for (const part of geminiParts) {
 				if (part.functionCall) {
 					toolCalls.push({
 						id: `call_${Math.random().toString(36).substring(2, 9)}`,
 						type: 'function',
 						function: {
 							name: part.functionCall.name,
-							arguments: part.functionCall.args
-						}
+							arguments: part.functionCall.args,
+						},
 					});
 				}
 			}
 		}
 
-		let responseText = extractText(aiRes);
+		const responseText = extractText(aiRes);
 
 		if (toolCalls.length > 0) {
-			const normalizedToolCalls = toolCalls.map((call: any, index: number) => {
-				const name = call.name || (call.function && call.function.name);
-				let args = call.arguments || (call.function && call.function.arguments);
+			const normalizedToolCalls: NormalizedToolCall[] = toolCalls.map((call, index) => {
+				const name = call.name || call.function?.name || '';
+				let args = call.arguments ?? call.function?.arguments ?? '';
 				if (typeof args !== 'string') {
 					try {
 						args = JSON.stringify(args);
@@ -245,7 +258,7 @@ export async function customRunWithTools(
 				return {
 					id: call.id || `call_${Math.random().toString(36).substring(2, 9)}_${index}`,
 					type: 'function',
-					function: { name, arguments: args }
+					function: { name, arguments: args },
 				};
 			});
 
@@ -253,18 +266,18 @@ export async function customRunWithTools(
 				role: 'assistant',
 				content: responseText,
 				tool_calls: normalizedToolCalls,
-				geminiParts: isGemini ? geminiParts : undefined
+				geminiParts: isGemini ? geminiParts : undefined,
 			});
 
 			for (const call of normalizedToolCalls) {
 				const toolName = call.function.name;
 				const toolId = call.id;
 				const toolArgsString = call.function.arguments;
-				const tool = tools.find((t: Tool) => t.name === toolName);
+				const tool = tools.find((t) => t.name === toolName);
 
 				if (tool && tool.function) {
 					try {
-						let parsedArgs;
+						let parsedArgs: unknown;
 						try {
 							parsedArgs = JSON.parse(toolArgsString);
 						} catch {
@@ -272,48 +285,54 @@ export async function customRunWithTools(
 						}
 						const result = await tool.function(parsedArgs);
 						const content = typeof result === 'string' ? result : JSON.stringify(result);
-						
-						const toolMessage: any = { role: 'tool', tool_call_id: toolId, name: toolName, content };
+
+						const toolMessage: ChatMessage = { role: 'tool', tool_call_id: toolId, name: toolName, content };
 						if (isGemini) {
-							toolMessage.geminiParts = [{
-								functionResponse: {
-									name: toolName,
-									response: { content }
-								}
-							}];
+							toolMessage.geminiParts = [
+								{
+									functionResponse: {
+										name: toolName,
+										response: { content },
+									},
+								},
+							];
 						}
 						messages.push(toolMessage);
 					} catch (e) {
 						console.error(`[customRunWithTools] Tool execution failed: ${toolName}`, e);
 						const content = `Error: ${String(e)}`;
-						const toolMessage: any = { role: 'tool', tool_call_id: toolId, name: toolName, content };
+						const toolMessage: ChatMessage = { role: 'tool', tool_call_id: toolId, name: toolName, content };
 						if (isGemini) {
-							toolMessage.geminiParts = [{
-								functionResponse: {
-									name: toolName,
-									response: { content }
-								}
-							}];
+							toolMessage.geminiParts = [
+								{
+									functionResponse: {
+										name: toolName,
+										response: { content },
+									},
+								},
+							];
 						}
 						messages.push(toolMessage);
 					}
 				} else {
 					const content = 'Tool not found';
-					const toolMessage: any = { role: 'tool', tool_call_id: toolId, name: toolName, content };
+					const toolMessage: ChatMessage = { role: 'tool', tool_call_id: toolId, name: toolName, content };
 					if (isGemini) {
-						toolMessage.geminiParts = [{
-							functionResponse: {
-								name: toolName,
-								response: { content }
-							}
-						}];
+						toolMessage.geminiParts = [
+							{
+								functionResponse: {
+									name: toolName,
+									response: { content },
+								},
+							},
+						];
 					}
 					messages.push(toolMessage);
 				}
 			}
 		} else {
 			if (config.streamFinalResponse) {
-				return await runModel(messages, true);
+				return (await runModel(messages, true)) as ReadableStream;
 			}
 			return aiRes;
 		}
@@ -324,7 +343,7 @@ export async function customRunWithTools(
 	return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
 }
 
-export async function sendMessageDraft(token: string, data: any) {
+export async function sendMessageDraft(token: string, data: Record<string, unknown>) {
 	try {
 		await fetch(`https://api.telegram.org/bot${token}/sendMessageDraft`, {
 			method: 'POST',
@@ -339,7 +358,7 @@ export async function sendMessageDraft(token: string, data: any) {
 /**
  * Get AI stream for a model.
  */
-export async function* getAiStream(ai: any, model: string, messages: any[], tools: Tool[] = []) {
+export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = []) {
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
 	const filter = createThinkFilter();
 
@@ -376,14 +395,20 @@ export async function* getAiStream(ai: any, model: string, messages: any[], tool
 	}
 }
 
+export interface StreamCtx {
+	env: { SECRET_TELEGRAM_API_TOKEN: string };
+	api: Api;
+	replyWithStream?: StreamContextExtension['replyWithStream'];
+}
+
 /**
  * Stream AI response to Telegram, with periodic updates to avoid rate limits.
  */
 export async function streamAiResponseToTelegram(
-	ctx: any,
-	ai: any,
+	ctx: StreamCtx,
+	ai: AiRunner,
 	modelId: string,
-	messages: any[],
+	messages: ChatMessage[],
 	task: Task,
 	tools: Tool[] = []
 ): Promise<string> {
@@ -396,7 +421,7 @@ export async function streamAiResponseToTelegram(
 		await sendMessageDraft(token, {
 			chat_id: task.chatId,
 			text: 'Thinking...',
-			parse_mode: 'HTML',
+			parse_mode: 'HTML' satisfies ParseMode,
 			message_thread_id: task.threadId,
 			business_connection_id: task.businessConnectionId,
 			draft_id: draftId,
@@ -411,10 +436,10 @@ export async function streamAiResponseToTelegram(
 		const iterator = getAiStream(ai, modelId, messages, tools);
 		let lastDraftUpdate = Date.now();
 
-		async function* streamWithMetadata() {
+		async function* streamWithMetadata(): AsyncIterable<MessageDraftPiece> {
 			for await (const chunk of iterator) {
 				streamContent += chunk;
-				yield chunk;
+				yield chunk as MessageDraftPiece;
 
 				if (Date.now() - lastDraftUpdate > 2000) {
 					await sendMessageDraft(token, {
@@ -429,12 +454,19 @@ export async function streamAiResponseToTelegram(
 				}
 			}
 		}
-		await ctx.replyWithStream(streamWithMetadata(), {
-			parse_mode: 'HTML',
-			message_thread_id: task.threadId,
-			business_connection_id: task.businessConnectionId,
-			reply_to_message_id: task.messageId,
-		});
+		await ctx.replyWithStream(
+			streamWithMetadata(),
+			{
+				parse_mode: 'HTML',
+				message_thread_id: task.threadId,
+			},
+			{
+				parse_mode: 'HTML',
+				message_thread_id: task.threadId,
+				business_connection_id: task.businessConnectionId,
+				reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+			}
+		);
 
 		await sendMessageDraft(token, {
 			chat_id: task.chatId,
@@ -489,7 +521,7 @@ export async function streamAiResponseToTelegram(
 								parse_mode: 'HTML',
 							},
 						})
-						.catch((e: any) => console.log('Error answering guest query:', e));
+						.catch((e: unknown) => console.log('Error answering guest query:', e));
 				} else {
 					console.log('[streamAiResponseToTelegram] guest_message has no guestQueryId, cannot answer');
 				}
@@ -505,13 +537,13 @@ export async function streamAiResponseToTelegram(
 					finish: true,
 				});
 				await ctx.api
-					.sendMessage(task.chatId, await markdownToHtml(streamContent), {
+					.sendMessage(task.chatId!, await markdownToHtml(streamContent), {
 						parse_mode: 'HTML',
 						message_thread_id: task.threadId,
 						business_connection_id: task.businessConnectionId,
 						reply_to_message_id: task.messageId,
 					})
-					.catch((e: any) => console.log('Error sending final message:', e));
+					.catch((e: unknown) => console.log('Error sending final message:', e));
 			}
 		}
 	}

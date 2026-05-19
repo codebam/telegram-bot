@@ -757,8 +757,6 @@ export default {
 					{
 						env,
 						api: botInstance.api,
-						reply: (text: string, options: Parameters<typeof botInstance.api.sendMessage>[2]) =>
-							botInstance.api.sendMessage(task.chatId!, text, options),
 					},
 					env.AI,
 					modelId,
