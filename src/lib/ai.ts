@@ -474,13 +474,26 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 		let streamFinished = false;
 		try {
 			while (!streamFinished) {
-				const { done, value } = await reader.read();
+				let result;
+				try {
+					result = await reader.read();
+				} catch (readErr) {
+					console.error(`[runStream] Reader Error at chunk ${chunkCount}:`, readErr);
+					break;
+				}
+
+				const { done, value } = result;
 				if (done) {
 					console.log(`[runStream] Stream Done. Chunks:${chunkCount}`);
 					break;
 				}
 				chunkCount++;
-				buffer += decoder.decode(value, { stream: true });
+				try {
+					buffer += decoder.decode(value, { stream: true });
+				} catch (decodeErr) {
+					console.error(`[runStream] Decode Error at chunk ${chunkCount}:`, decodeErr);
+					continue;
+				}
 				
 				// Only process if we have a newline or the buffer is getting large
 				if (!buffer.includes('\n') && buffer.length < 1024) {
@@ -530,7 +543,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 								yield { type: 'content', text: '' };
 							}
 						} catch (e) {
-							console.log(`[runStream] JSON ERR:${chunkCount} line:"${trimmed.slice(0, 40)}..."`);
+							console.error(`[runStream] JSON ERR:${chunkCount} line:"${trimmed.slice(0, 40)}..."`, e);
 						}
 					} else if (trimmed.startsWith('{')) {
 						try {
@@ -557,12 +570,14 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							} else {
 								yield { type: 'content', text: '' };
 							}
-						} catch {
+						} catch (e) {
 							// Not valid JSON after all, ignore
 						}
 					}
 				}
 			}
+		} catch (outerErr) {
+			console.error(`[runStream] Fatal Loop Error:`, outerErr);
 		} finally {
 			try {
 				reader.releaseLock();
