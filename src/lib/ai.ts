@@ -297,7 +297,8 @@ export async function customRunWithTools(
 
 	let turn = 0;
 	while (turn < 5) {
-		const shouldStream = turn === 4 || cfTools.length === 0 ? config.streamFinalResponse : false;
+		const isFinalTurn = turn > 0 || cfTools.length === 0;
+		const shouldStream = isFinalTurn ? config.streamFinalResponse : false;
 		const response = await runModel(messages, shouldStream, turn > 0);
 
 		if (shouldStream || response instanceof ReadableStream) {
