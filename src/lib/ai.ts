@@ -122,6 +122,9 @@ export function extractText(obj: ExtractInput): string {
 	if (typeof response.response === 'string') return response.response;
 	if (typeof response.text === 'string') return response.text;
 	if (typeof response.content === 'string') return response.content;
+	if (typeof response.delta === 'object' && response.delta !== null && typeof (response.delta as any).content === 'string') {
+		return (response.delta as any).content;
+	}
 	if (typeof response.delta === 'string') return response.delta;
 
 	if (Array.isArray(response.choices) && response.choices.length > 0)
@@ -487,6 +490,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 
 				for (const line of lines) {
 					const trimmed = line.trim();
+					if (!trimmed) continue;
 					if (trimmed.startsWith('data: ')) {
 						const data = trimmed.substring(6);
 						if (data === '[DONE]') break;
@@ -497,8 +501,20 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 								const filtered = filter.push(text);
 								if (filtered) yield filtered;
 							}
+						} catch (e) {
+							console.log(`[runStream] Failed to parse JSON from line: "${trimmed.slice(0, 100)}..."`);
+						}
+					} else {
+						// Attempt to parse line as raw JSON if it doesn't have 'data: ' prefix
+						try {
+							const parsed = JSON.parse(trimmed);
+							const text = extractText(parsed);
+							if (text) {
+								const filtered = filter.push(text);
+								if (filtered) yield filtered;
+							}
 						} catch {
-							// Ignore parsing chunks
+							// Not JSON, ignore
 						}
 					}
 				}
