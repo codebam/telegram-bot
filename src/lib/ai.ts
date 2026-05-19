@@ -265,8 +265,13 @@ export async function customRunWithTools(
 						cleanMessage.content = '';
 					}
 					// Strip tool_calls from history to prevent serverless GPU parser crashes when tool responses are mapped to user roles
+					// Fill empty assistant messages with a descriptive placeholder to prevent serverless template parser hangs on empty turns
 					if ('tool_calls' in cleanMessage) {
 						delete cleanMessage.tool_calls;
+						if (!cleanMessage.content || !cleanMessage.content.trim()) {
+							const toolNames = m.tool_calls?.map((tc: any) => tc.function?.name).join(', ') || 'tool';
+							cleanMessage.content = `[Executing tool: ${toolNames}]`;
+						}
 					}
 					return cleanMessage;
 				}),
