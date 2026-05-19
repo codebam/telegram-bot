@@ -1,4 +1,4 @@
-import { Bot, Context, webhookCallback, session } from 'grammy';
+import { Bot, Context, webhookCallback, session, GrammyError, HttpError } from 'grammy';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { stream, type StreamFlavor } from '@grammyjs/stream';
 import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
@@ -420,6 +420,13 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			console.log(`[Grammy-Update] Finished handling update ${ctx.update.update_id}`);
 		} catch (e) {
 			console.error(`[Grammy-Update] Error handling update ${ctx.update.update_id}:`, e);
+			if (e instanceof GrammyError) {
+				console.error(`[Grammy-Error-Detail] Method: ${e.method}, Error Code: ${e.error_code}, Description: ${e.description}`);
+			} else if (e instanceof HttpError) {
+				console.error(`[Grammy-Error-Detail] HTTP network connection error contacting Telegram API.`, e);
+			} else if (e instanceof Error) {
+				console.error(`[Grammy-Error-Detail] Stack trace:\n${e.stack}`);
+			}
 			throw e;
 		}
 	});
@@ -818,9 +825,17 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 
 	bot.catch((err) => {
 		const ctx = err.ctx;
-		console.error(`[Grammy-Error] Error while handling update ${ctx?.update?.update_id}:`, err.error);
-		if (err instanceof Error) {
-			console.error(`[Grammy-Error] Stack trace:\n${err.stack}`);
+		const e = err.error;
+		console.error(`[Grammy-Error] Error while handling update ${ctx?.update?.update_id}:`);
+		if (e instanceof GrammyError) {
+			console.error(`[Grammy-Error-Detail] Method: ${e.method}, Error Code: ${e.error_code}, Description: ${e.description}`);
+		} else if (e instanceof HttpError) {
+			console.error(`[Grammy-Error-Detail] HTTP network connection error contacting Telegram API.`, e);
+		} else if (e instanceof Error) {
+			console.error(`[Grammy-Error-Detail] Unknown error:`, e.message);
+			console.error(`[Grammy-Error-Detail] Stack trace:\n${e.stack}`);
+		} else {
+			console.error(`[Grammy-Error-Detail] Unknown error object:`, e);
 		}
 	});
 }
@@ -1032,8 +1047,20 @@ export default {
 				});
 			}
 		}
-		return webhookCallback(bot, 'cloudflare-mod', {
-			onTimeout: 'return',
-		})(request);
+		try {
+			return await webhookCallback(bot, 'cloudflare-mod', {
+				onTimeout: 'return',
+			})(request);
+		} catch (e: any) {
+			console.error('[Fetch-Webhook-Error] Error during webhook update handling:', e);
+			if (e instanceof GrammyError) {
+				console.error(`[Fetch-Webhook-Error] GrammyError: ${e.method}, Error Code: ${e.error_code}, Description: ${e.description}`);
+			} else if (e instanceof HttpError) {
+				console.error(`[Fetch-Webhook-Error] HttpError: Could not contact Telegram API.`, e);
+			} else if (e instanceof Error) {
+				console.error(`[Fetch-Webhook-Error] Stack trace:\n${e.stack}`);
+			}
+			return new Response('Internal Webhook Error', { status: 500 });
+		}
 		},
 		};
