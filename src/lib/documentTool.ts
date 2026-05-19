@@ -148,6 +148,10 @@ export async function parseTelegramFile(
 			return 'Document parsed successfully but no text content found.';
 		}
 
+		// Store document introduction/first 3000 chars in KV cache for quick overview retrievals
+		const introKey = `doc_intro:${file_id}`;
+		await env.CONVERSATION_HISTORY.put(introKey, rawText.substring(0, 3000), { expirationTtl: 86400 * 7 });
+
 		// RAG flow for large files
 		if (rawText.length >= 5000 && env.VECTORIZE) {
 			const indexedKey = `indexed:${file_id}`;
@@ -249,6 +253,17 @@ export const createTelegramFileSearchTool = (
 				if (!env.VECTORIZE) {
 					return 'Error: Vectorize index is not bound in this environment.';
 				}
+
+				// Intercept generic summary / overview queries and immediately return cached document intro
+				const isGenericQuery = /summary|overview|about|what is this|description/i.test(query);
+				if (isGenericQuery) {
+					console.log(`[search_telegram_file] Intercepted generic summary/overview query: "${query}"`);
+					const intro = await env.CONVERSATION_HISTORY.get(`doc_intro:${file_id}`);
+					if (intro) {
+						return `[Document Overview / Introduction]:\n\n${intro}`;
+					}
+				}
+
 				console.log(`[search_telegram_file] Embedding query: "${query}"`);
 				const embedRes = (await env.AI.run('@cf/baai/bge-large-en-v1.5', {
 					text: [query]
@@ -264,6 +279,11 @@ export const createTelegramFileSearchTool = (
 				});
 
 				if (!searchRes.matches || searchRes.matches.length === 0) {
+					console.log(`[search_telegram_file] Vectorize returned 0 matches. Attempting intro fallback.`);
+					const intro = await env.CONVERSATION_HISTORY.get(`doc_intro:${file_id}`);
+					if (intro) {
+						return `No specific semantic matches found for "${query}". Here is the document overview / introduction for context:\n\n${intro}`;
+					}
 					return `No relevant matches found in the document for query: "${query}"`;
 				}
 

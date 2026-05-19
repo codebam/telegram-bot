@@ -264,6 +264,10 @@ export async function customRunWithTools(
 					if (cleanMessage.content === null || cleanMessage.content === undefined) {
 						cleanMessage.content = '';
 					}
+					// Strip tool_calls from history to prevent serverless GPU parser crashes when tool responses are mapped to user roles
+					if ('tool_calls' in cleanMessage) {
+						delete cleanMessage.tool_calls;
+					}
 					return cleanMessage;
 				}),
 				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
