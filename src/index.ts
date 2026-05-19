@@ -926,6 +926,9 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 }
 
 export default {
+	async queue(batch: MessageBatch<any>, env: Environment): Promise<void> {
+		console.log('[Queue] Dummy handler called (Queues are being removed)');
+	},
 	async fetch(request: Request, env: Environment, executionCtx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const xSource = request.headers.get('x-source');
