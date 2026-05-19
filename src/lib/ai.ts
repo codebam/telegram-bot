@@ -261,7 +261,9 @@ export async function customRunWithTools(
 				messages: msgs.map((m) => {
 					// Ensure content is not null (use empty string if empty/null)
 					const cleanMessage: any = { ...m };
-					if (cleanMessage.content === null || cleanMessage.content === undefined) {
+					if (cleanMessage.role === 'assistant' && cleanMessage.tool_calls && !cleanMessage.content) {
+						cleanMessage.content = null;
+					} else if (cleanMessage.content === null || cleanMessage.content === undefined) {
 						cleanMessage.content = '';
 					}
 					// Remove internal geminiParts before sending to CF
@@ -270,7 +272,6 @@ export async function customRunWithTools(
 				}),
 				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
 				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
-				parallel_tool_calls: (!omitTools && cfTools.length > 0) ? false : undefined,
 				stream,
 			};
 
@@ -280,7 +281,13 @@ export async function customRunWithTools(
 			}));
 
 			const result = await ai.run(model, options);
-			console.log(`[customRunWithTools] ai.run returned successfully. Type: ${typeof result}, Keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') : 'none'}`);
+			console.log(`[customRunWithTools] ai.run returned. Type: ${typeof result}, Keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') : 'none'}`);
+			
+			if (stream && !(result instanceof ReadableStream)) {
+				if (result && typeof result === 'object' && 'body' in result && result.body instanceof ReadableStream) {
+					return result.body;
+				}
+			}
 			return result;
 		} catch (e) {
 			console.error(`[customRunWithTools] ai.run failed for model ${model}:`, e);

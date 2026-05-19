@@ -233,7 +233,7 @@ export const createTelegramFileReaderTool = (
 ) => {
 	const modelConfig = Object.values(AVAILABLE_MODELS).find((cfg) => cfg.id === modelId);
 	const supportsVision = modelConfig?.supportsVision || false;
-	const limit = 50000;
+	const limit = 20000;
 
 	return {
 		name: 'read_telegram_file',
@@ -287,7 +287,7 @@ export const createTelegramFileSearchTool = (
 						file_name || 'document.md',
 						false,
 						undefined,
-						30000
+						20000
 					);
 					console.log(`[search_telegram_file] On-the-fly indexing result:`, parseResult);
 					intro = await env.CONVERSATION_HISTORY.get<string>(introKey);
