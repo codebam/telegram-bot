@@ -53,6 +53,11 @@ id = "7c147881ce7d42b8811bfbf8c38e3ee4"
 binding = "R2"
 bucket_name = "share"
 
+[[env.dev.workflows]]
+name = "bot-workflow-dev"
+binding = "STREAM_WORKFLOW"
+class_name = "BotWorkflow"
+
 [[env.dev.containers]]
 class_name = "Sandbox"
 image = "docker.io/cloudflare/sandbox:0.10.1-python"
@@ -78,6 +83,11 @@ id = "7c147881ce7d42b8811bfbf8c38e3ee4"
 [[env.production.r2_buckets]]
 binding = "R2"
 bucket_name = "share"
+
+[[env.production.workflows]]
+name = "bot-workflow"
+binding = "STREAM_WORKFLOW"
+class_name = "BotWorkflow"
 
 [[env.production.containers]]
 class_name = "Sandbox"
