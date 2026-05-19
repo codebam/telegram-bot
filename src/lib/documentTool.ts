@@ -1,5 +1,6 @@
 import { getDocumentProxy, extractText } from 'unpdf';
 import JSZip from 'jszip';
+import { Bot } from 'grammy';
 import { AVAILABLE_MODELS, type ChatMessage, type Environment } from '@codebam/shared';
 
 function chunkText(text: string, chunkSize = 1000, overlap = 200): string[] {
@@ -63,19 +64,14 @@ export async function parseTelegramFile(
 	try {
 		console.log(`[parseTelegramFile] Native JS parsing triggered for FileID: ${file_id}, Name: ${file_name}, Limit: ${limit}`);
 		
-		const getFileUrl = `https://api.telegram.org/bot${env.SECRET_TELEGRAM_API_TOKEN}/getFile?file_id=${file_id}`;
-		const getFileRes = await fetch(getFileUrl);
-		if (!getFileRes.ok) {
-			console.error(`[parseTelegramFile] Telegram getFile failed: ${getFileRes.status}`);
-			return `Error: Failed to fetch file info from Telegram API. Status: ${getFileRes.status}`;
-		}
-		const getFileData = (await getFileRes.json()) as { ok: boolean; result?: { file_path?: string } };
-		if (!getFileData.ok || !getFileData.result?.file_path) {
-			console.error(`[parseTelegramFile] Telegram getFile response invalid:`, getFileData);
-			return `Error: Failed to retrieve file path from Telegram API response.`;
+		const api = new Bot(env.SECRET_TELEGRAM_API_TOKEN).api;
+		const file = await api.getFile(file_id);
+		if (!file.file_path) {
+			console.error(`[parseTelegramFile] Telegram getFile failed or returned no file_path:`, file);
+			return `Error: Failed to retrieve file path from Telegram API.`;
 		}
 
-		const downloadUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${getFileData.result.file_path}`;
+		const downloadUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
 		const downloadRes = await fetch(downloadUrl);
 		if (!downloadRes.ok) {
 			console.error(`[parseTelegramFile] Telegram file download failed: ${downloadRes.status}`);

@@ -406,42 +406,25 @@ export async function customRunWithTools(
 	return finalResponse as AiResponse;
 }
 
-export async function sendMessageDraft(token: string, data: Record<string, unknown>, retries = 3) {
+export async function sendMessageDraft(api: Api, data: Record<string, any>, retries = 3) {
 	const textLen = typeof data.text === 'string' ? data.text.length : 0;
 	for (let i = 0; i < retries; i++) {
 		try {
-			const controller = new AbortController();
-			const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
-
-			const response = await fetch(`https://api.telegram.org/bot${token}/sendMessageDraft`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(data),
-				signal: controller.signal,
-			});
-			clearTimeout(timeoutId);
-
-			if (!response.ok) {
-				const errorText = await response.text();
-				console.error(`[sendMessageDraft] Attempt ${i + 1} Failed. Status: ${response.status}, Len: ${textLen}, Error: ${errorText}`);
-				if (response.status === 429) {
-					// Too Many Requests, wait and retry
-					const retryAfter = parseInt(response.headers.get('retry-after') || '1') * 1000;
-					await new Promise(resolve => setTimeout(resolve, retryAfter));
-					continue;
-				}
-				if (response.status >= 500) {
-					await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-					continue;
-				}
-				break; // Don't retry other 4xx errors
-			} else {
-				console.log(`[sendMessageDraft] Success. Len: ${textLen}, Status: ${response.status}`);
-				return;
-			}
+			await (api.raw as any).sendMessageDraft(data);
+			console.log(`[sendMessageDraft] Success. Len: ${textLen}`);
+			return;
 		} catch (e: any) {
-			console.error(`[sendMessageDraft] Attempt ${i + 1} Exception. Len: ${textLen}, Error:`, e.name === 'AbortError' ? 'Timeout' : e);
-			await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+			console.error(`[sendMessageDraft] Attempt ${i + 1} Failed. Len: ${textLen}, Error:`, e);
+			if (e.error_code === 429) {
+				const retryAfter = (e.parameters?.retry_after || 1) * 1000;
+				await new Promise(resolve => setTimeout(resolve, retryAfter));
+				continue;
+			}
+			if (e.error_code >= 500) {
+				await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+				continue;
+			}
+			break;
 		}
 	}
 }
@@ -671,13 +654,12 @@ export async function streamAiResponseToTelegram(
 	task: Task,
 	tools: Tool[] = []
 ): Promise<string> {
-	const token = task.telegramToken || task.token || ctx.env.SECRET_TELEGRAM_API_TOKEN;
 	const draftId = task.updateId || Date.now();
 
 	console.log(`[streamAiResponseToTelegram] Starting for task: ${task.type}, updateType: ${task.updateType}, model: ${modelId}`);
 
 	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
-		await sendMessageDraft(token, {
+		await sendMessageDraft(ctx.api, {
 			chat_id: task.chatId,
 			text: '>Thinking',
 			parse_mode: 'MarkdownV2',
@@ -715,7 +697,7 @@ export async function streamAiResponseToTelegram(
 					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''), true)
 					: (hasSeenReasoning ? '>Reasoning' : '>Thinking');
 
-				await sendMessageDraft(token, {
+				await sendMessageDraft(ctx.api, {
 					chat_id: task.chatId,
 					text,
 					parse_mode: 'MarkdownV2',
@@ -770,7 +752,7 @@ export async function streamAiResponseToTelegram(
 				.catch((e: unknown) => console.error('[streamAiResponseToTelegram] Business Message Error:', e));
 		} else {
 			console.log('[streamAiResponseToTelegram] final sendMessageDraft and sendMessage');
-			await sendMessageDraft(token, {
+			await sendMessageDraft(ctx.api, {
 				chat_id: task.chatId,
 				text: finalMessage,
 				parse_mode: 'MarkdownV2',
@@ -792,4 +774,5 @@ export async function streamAiResponseToTelegram(
 		console.warn('[streamAiResponseToTelegram] No content to send.');
 	}
 
-	return streamContent;}
+	return streamContent;
+}

@@ -1,4 +1,4 @@
-import { Bot, Context, webhookCallback, session, GrammyError, HttpError } from 'grammy';
+import { Bot, Api, Context, webhookCallback, session, GrammyError, HttpError } from 'grammy';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { stream, type StreamFlavor } from '@grammyjs/stream';
 import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
@@ -8,7 +8,7 @@ import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
 import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
-import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
+import { streamAiResponseToTelegram, customRunWithTools, sendMessageDraft } from './lib/ai.js';
 
 export { Sandbox } from '@cloudflare/sandbox';
 
@@ -34,6 +34,7 @@ type MyContext = StreamFlavor<BaseContext & ConversationFlavor<BaseContext>>;
 type MyConversation = Conversation<MyContext, MyContext>;
 
 async function getBusinessOwnerData(
+	api: Api,
 	env: Environment,
 	connectionId: string
 ): Promise<{ id: number; name: string; username?: string } | null> {
@@ -46,40 +47,23 @@ async function getBusinessOwnerData(
 	} else {
 		console.log(`[getBusinessOwnerData] Cache MISS or stale entry for connection ${connectionId}. Fetching from Telegram API...`);
 		try {
-			const response = await fetch(`https://api.telegram.org/bot${env.SECRET_TELEGRAM_API_TOKEN}/getBusinessConnection?business_connection_id=${connectionId}`);
-			console.log(`[getBusinessOwnerData] Telegram API response status: ${response.status}`);
-			if (response.status === 200) {
-				const json = (await response.json()) as {
-					ok: boolean;
-					result?: {
-						user?: { first_name: string; username?: string; id: number };
-						user_chat_id?: number;
-					};
-				};
-				console.log(`[getBusinessOwnerData] Telegram API returned JSON:`, JSON.stringify(json));
-				if (json.ok && json.result) {
-					const id = json.result.user?.id || json.result.user_chat_id;
-					const name = json.result.user?.first_name || 'the business owner';
-					const username = json.result.user?.username;
-					if (id) {
-						ownerData = { id, name, username };
-						console.log(`[getBusinessOwnerData] Successfully resolved owner: id=${id}, name=${name}, username=${username ?? ''}. Caching in KV...`);
-						await env.CONVERSATION_HISTORY.put(
-							`active_connection:${id}`,
-							connectionId
-						);
-						await env.CONVERSATION_HISTORY.put(
-							`business_connection:${connectionId}`,
-							JSON.stringify(ownerData)
-						);
-					} else {
-						console.error(`[getBusinessOwnerData] Failed to resolve owner ID from result:`, JSON.stringify(json.result));
-					}
-				} else {
-					console.error(`[getBusinessOwnerData] Telegram API returned ok=false or missing result:`, JSON.stringify(json));
-				}
+			const result = await api.getBusinessConnection(connectionId);
+			const id = result.user?.id || result.user_chat_id;
+			const name = result.user?.first_name || 'the business owner';
+			const username = result.user?.username;
+			if (id) {
+				ownerData = { id, name, username };
+				console.log(`[getBusinessOwnerData] Successfully resolved owner: id=${id}, name=${name}, username=${username ?? ''}. Caching in KV...`);
+				await env.CONVERSATION_HISTORY.put(
+					`active_connection:${id}`,
+					connectionId
+				);
+				await env.CONVERSATION_HISTORY.put(
+					`business_connection:${connectionId}`,
+					JSON.stringify(ownerData)
+				);
 			} else {
-				console.error(`[getBusinessOwnerData] Telegram API call failed. Status: ${response.status}`);
+				console.error(`[getBusinessOwnerData] Failed to resolve owner ID from result:`, JSON.stringify(result));
 			}
 		} catch (e) {
 			console.error('[getBusinessOwnerData] Failed to fetch business connection:', e);
@@ -102,7 +86,7 @@ async function chargeStars(
 		const customerId = ctx.update.business_message?.chat.id;
 		if (connectionId && customerId) {
 			userId = `business:${connectionId}:${customerId}`;
-			const ownerData = await getBusinessOwnerData(ctx.env, connectionId);
+			const ownerData = await getBusinessOwnerData(ctx.api, ctx.env, connectionId);
 			if (ownerData?.id) {
 				billingUserId = ownerData.id;
 			}
@@ -160,7 +144,7 @@ async function chargeStars(
 				let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
 				const connectionId = ctx.update.business_message?.business_connection_id;
 				if (connectionId) {
-					const ownerData = await getBusinessOwnerData(ctx.env, connectionId);
+					const ownerData = await getBusinessOwnerData(ctx.api, ctx.env, connectionId);
 					if (ownerData) {
 						prompt = prompt.replace(/{owner_name}/g, ownerData.name);
 						const facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
@@ -186,7 +170,7 @@ async function chargeStars(
 		}
 
 		ctx.executionCtx.waitUntil(
-			ctx.env.MESSAGE_QUEUE.send(task).catch(console.error)
+			processTask(task, ctx.env)
 		);
 	} else {
 		if (ctx.update.business_message || ctx.update.guest_message) {
@@ -269,7 +253,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 			if (ctx.update.business_message) {
 				const connectionId = ctx.update.business_message?.business_connection_id;
 				if (connectionId) {
-					ownerData = await conversation.external(() => getBusinessOwnerData(env, connectionId));
+					ownerData = await conversation.external(() => getBusinessOwnerData(ctx.api, env, connectionId));
 					if (ownerData?.id) {
 						billingUserId = ownerData.id;
 					}
@@ -650,6 +634,32 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		});
 	});
 
+	commands.command('stream', 'Stream incrementing numbers', async (ctx) => {
+		const draftId = Date.now();
+		for (let i = 1; i <= 20; i++) {
+			if (i === 20) {
+				await sendMessageDraft(ctx.api, {
+					chat_id: ctx.chat?.id,
+					text: i.toString(),
+					draft_id: draftId,
+					business_connection_id: ctx.update.business_message?.business_connection_id,
+					finish: true,
+				});
+				await ctx.reply(i.toString(), {
+					business_connection_id: ctx.update.business_message?.business_connection_id,
+				});
+			} else {
+				await sendMessageDraft(ctx.api, {
+					chat_id: ctx.chat?.id,
+					text: i.toString(),
+					draft_id: draftId,
+					business_connection_id: ctx.update.business_message?.business_connection_id,
+				});
+				await new Promise((resolve) => setTimeout(resolve, 2000));
+			}
+		}
+	});
+
 	bot.use(commands);
 
 	bot.on('message:document', async (ctx) => {
@@ -682,7 +692,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			return;
 		}
 		task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
-		ctx.executionCtx.waitUntil(ctx.env.MESSAGE_QUEUE.send(task).catch(console.error));
+		ctx.executionCtx.waitUntil(processTask(task, ctx.env));
 		await ctx.env.CONVERSATION_HISTORY.delete(`task:${taskId}`);
 	});
 
@@ -847,78 +857,75 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 }
 
-export default {
-	async queue(batch: MessageBatch<Task>, env: Environment): Promise<void> {
-		for (const message of batch.messages) {
-			const task = message.body;
+async function processTask(task: Task, env: Environment): Promise<void> {
+	try {
+		const token = env.SECRET_TELEGRAM_API_TOKEN;
+		if (!token) {
+			throw new Error('SECRET_TELEGRAM_API_TOKEN is empty in processTask');
+		}
+		const botInstance = new Bot<MyContext>(token);
+		botInstance.api.config.use(autoRetry());
+
+		const userMessage: ChatMessage = { role: 'user', content: task.prompt };
+		if (task.type === 'photo' && task.fileId) {
 			try {
-				const token = env.SECRET_TELEGRAM_API_TOKEN;
-				if (!token) {
-					throw new Error('SECRET_TELEGRAM_API_TOKEN is empty in queue handler');
-				}
-				const botInstance = new Bot<MyContext>(token);
-				botInstance.api.config.use(autoRetry());
-
-				const userMessage: ChatMessage = { role: 'user', content: task.prompt };
-				if (task.type === 'photo' && task.fileId) {
-					try {
-						const file = await botInstance.api.getFile(task.fileId);
-						const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-						const fileRes = await fetch(fileUrl);
-						if (fileRes.ok) {
-							const arrayBuffer = await fileRes.arrayBuffer();
-							const base64Data = arrayBufferToBase64(arrayBuffer);
-							userMessage.geminiParts = [
-								{ text: task.prompt || 'Please describe this image' },
-								{
-									inlineData: {
-										mimeType: 'image/jpeg',
-										data: base64Data
-									}
-								}
-							];
+				const file = await botInstance.api.getFile(task.fileId);
+				const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+				const fileRes = await fetch(fileUrl);
+				if (fileRes.ok) {
+					const arrayBuffer = await fileRes.arrayBuffer();
+					const base64Data = arrayBufferToBase64(arrayBuffer);
+					userMessage.geminiParts = [
+						{ text: task.prompt || 'Please describe this image' },
+						{
+							inlineData: {
+								mimeType: 'image/jpeg',
+								data: base64Data
+							}
 						}
-					} catch (e) {
-						console.error('[Queue] Failed to download image for vision task:', e);
-					}
-				}
-
-				const messages = [
-					{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
-					...(task.history || []),
-					userMessage,
-				];
-				const modelId = task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8';
-
-				const responseContent = await streamAiResponseToTelegram(
-					{
-						env,
-						api: botInstance.api,
-					},
-					env.AI,
-					modelId,
-					messages,
-					task,
-					[
-						fetchTool,
-						wikipediaTool,
-						createTavilySearchTool(env.TAVILY_API_KEY || ''),
-						createSandboxTool(env.Sandbox, String(task.userId)),
-						createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, modelId),
-						createTelegramFileSearchTool(env, modelId),
-					],
-				);
-
-				if (task.userId && responseContent) {
-					const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
-					await historyManager.addMessage(task.userId, task.prompt, responseContent, task.threadId);
+					];
 				}
 			} catch (e) {
-				console.error('[Queue] Error processing message:', e);
-				message.retry();
+				console.error('[processTask] Failed to download image for vision task:', e);
 			}
 		}
-	},
+
+		const messages = [
+			{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
+			...(task.history || []),
+			userMessage,
+		];
+		const modelId = task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8';
+
+		const responseContent = await streamAiResponseToTelegram(
+			{
+				env,
+				api: botInstance.api,
+			},
+			env.AI,
+			modelId,
+			messages,
+			task,
+			[
+				fetchTool,
+				wikipediaTool,
+				createTavilySearchTool(env.TAVILY_API_KEY || ''),
+				createSandboxTool(env.Sandbox, String(task.userId)),
+				createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, modelId),
+				createTelegramFileSearchTool(env, modelId),
+			],
+		);
+
+		if (task.userId && responseContent) {
+			const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
+			await historyManager.addMessage(task.userId, task.prompt, responseContent, task.threadId);
+		}
+	} catch (e) {
+		console.error('[processTask] Error processing task:', e);
+	}
+}
+
+export default {
 	async fetch(request: Request, env: Environment, executionCtx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const xSource = request.headers.get('x-source');
@@ -936,12 +943,11 @@ export default {
 			const userMessage: ChatMessage = { role: 'user', content: task.prompt };
 			if (task.type === 'photo' && task.fileId) {
 				try {
-					const getFileRes = await fetch(`https://api.telegram.org/bot${env.SECRET_TELEGRAM_API_TOKEN}/getFile?file_id=${task.fileId}`);
-					if (getFileRes.ok) {
-						const getFileData = await getFileRes.json() as { ok: boolean, result?: { file_path?: string } };
-						if (getFileData.ok && getFileData.result?.file_path) {
-							const fileUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${getFileData.result.file_path}`;
-							const fileRes = await fetch(fileUrl);
+					const api = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN).api;
+					const file = await api.getFile(task.fileId);
+					if (file.file_path) {
+						const fileUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
+						const fileRes = await fetch(fileUrl);
 							if (fileRes.ok) {
 								const arrayBuffer = await fileRes.arrayBuffer();
 								const base64Data = arrayBufferToBase64(arrayBuffer);
@@ -1031,29 +1037,32 @@ export default {
 			if (url.searchParams.get('command') === 'set') {
 				const token = env.SECRET_TELEGRAM_API_TOKEN;
 				const webhookUrl = `${url.origin}${url.pathname}`;
-				const telegramUrl = `https://api.telegram.org/bot${token}/setWebhook`;
+				const api = new Bot<MyContext>(token).api;
 
-				const params = new URLSearchParams({
-					url: webhookUrl,
-					max_connections: '40',
-					allowed_updates: JSON.stringify([
-						'message',
-						'edited_message',
-						'callback_query',
-						'inline_query',
-						'guest_message',
-						'business_message',
-						'business_connection',
-						'pre_checkout_query',
-					]),
-					drop_pending_updates: 'true',
-				});
-
-				const res = await fetch(`${telegramUrl}?${params.toString()}`);
-				return new Response(JSON.stringify(await res.json()), {
-					headers: { 'Content-Type': 'application/json' },
-					status: res.status,
-				});
+				try {
+					const result = await api.setWebhook(webhookUrl, {
+						max_connections: 40,
+						allowed_updates: [
+							'message',
+							'edited_message',
+							'callback_query',
+							'inline_query',
+							'guest_message',
+							'business_message',
+							'business_connection',
+							'pre_checkout_query',
+						],
+						drop_pending_updates: true,
+					});
+					return new Response(JSON.stringify({ ok: result }), {
+						headers: { 'Content-Type': 'application/json' },
+					});
+				} catch (e: any) {
+					return new Response(JSON.stringify({ ok: false, error: e.message }), {
+						headers: { 'Content-Type': 'application/json' },
+						status: 500,
+					});
+				}
 			}
 		}
 		try {
