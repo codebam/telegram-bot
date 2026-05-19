@@ -497,6 +497,9 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 						try {
 							const parsed = JSON.parse(data);
 							const text = extractText(parsed);
+							if (chunkCount <= 5) {
+								console.log(`[runStream] Chunk ${chunkCount} keys: ${Object.keys(parsed).join(', ')}. Text preview: "${text.slice(0, 50)}..."`);
+							}
 							if (text) {
 								const filtered = filter.push(text);
 								if (filtered) yield filtered;
@@ -509,6 +512,9 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 						try {
 							const parsed = JSON.parse(trimmed);
 							const text = extractText(parsed);
+							if (chunkCount <= 5) {
+								console.log(`[runStream] Raw JSON chunk ${chunkCount} keys: ${Object.keys(parsed).join(', ')}. Text preview: "${text.slice(0, 50)}..."`);
+							}
 							if (text) {
 								const filtered = filter.push(text);
 								if (filtered) yield filtered;
@@ -601,14 +607,7 @@ export async function streamAiResponseToTelegram(
 	console.log(`[streamAiResponseToTelegram] Starting for task: ${task.type}, updateType: ${task.updateType}, model: ${modelId}`);
 
 	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
-		await sendMessageDraft(token, {
-			chat_id: task.chatId,
-			text: 'Thinking...',
-			parse_mode: 'HTML' satisfies ParseMode,
-			message_thread_id: task.threadId,
-			business_connection_id: task.businessConnectionId,
-			draft_id: draftId,
-		});
+		// I specifically don't want a placeholder message like "Thinking..."
 	}
 
 	let streamContent = '';
