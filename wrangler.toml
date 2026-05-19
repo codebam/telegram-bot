@@ -29,7 +29,7 @@ max_batch_timeout = 5
 
 [[containers]]
 class_name = "Sandbox"
-image = "./Dockerfile"
+image = "cloudflare/sandbox:0.10.1-python"
 
 [[durable_objects.bindings]]
 class_name = "Sandbox"
@@ -68,7 +68,7 @@ max_batch_timeout = 5
 
 [[env.dev.containers]]
 class_name = "Sandbox"
-image = "./Dockerfile"
+image = "cloudflare/sandbox:0.10.1-python"
 
 [[env.dev.durable_objects.bindings]]
 class_name = "Sandbox"
@@ -103,7 +103,7 @@ max_batch_timeout = 5
 
 [[env.production.containers]]
 class_name = "Sandbox"
-image = "./Dockerfile"
+image = "cloudflare/sandbox:0.10.1-python"
 
 [[env.production.durable_objects.bindings]]
 class_name = "Sandbox"
