@@ -7,6 +7,7 @@ import {
 	extractThinking,
 	extractReasoning,
 	stripThinking,
+	sanitizeMarkdownV2,
 	THINK_TAGS,
 	type AiResponse,
 	type ChatMessage,
@@ -578,10 +579,12 @@ export interface StreamCtx {
 async function formatTelegramMessage(content: string, thinking?: string, reasoning?: string): Promise<string> {
 	let message = '';
 	if (thinking) {
-		message += `>**Thinking**\n${thinking}\n\n`.split('\n').map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
+		const sanitizedThinking = sanitizeMarkdownV2(thinking);
+		message += `>**Thinking**\n${sanitizedThinking}\n\n`.split('\n').map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
 	}
 	if (reasoning) {
-		message += `>**Reasoning**\n${reasoning}\n\n`.split('\n').map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
+		const sanitizedReasoning = sanitizeMarkdownV2(reasoning);
+		message += `>**Reasoning**\n${sanitizedReasoning}\n\n`.split('\n').map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
 	}
 	message += await markdownToMarkdownV2(content);
 	return message;
