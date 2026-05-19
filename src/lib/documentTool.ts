@@ -39,20 +39,24 @@ export const createTelegramFileReaderTool = (
 				const getFileUrl = `https://api.telegram.org/bot${telegramToken}/getFile?file_id=${file_id}`;
 				const getFileRes = await fetch(getFileUrl);
 				if (!getFileRes.ok) {
+					console.error(`[read_telegram_file] Telegram getFile failed: ${getFileRes.status}`);
 					return `Error: Failed to fetch file info from Telegram API. Status: ${getFileRes.status}`;
 				}
 				const getFileData = (await getFileRes.json()) as { ok: boolean; result?: { file_path?: string } };
 				if (!getFileData.ok || !getFileData.result?.file_path) {
+					console.error(`[read_telegram_file] Telegram getFile response invalid:`, getFileData);
 					return `Error: Failed to retrieve file path from Telegram API response.`;
 				}
 
 				const downloadUrl = `https://api.telegram.org/file/bot${telegramToken}/${getFileData.result.file_path}`;
 				const downloadRes = await fetch(downloadUrl);
 				if (!downloadRes.ok) {
+					console.error(`[read_telegram_file] Telegram file download failed: ${downloadRes.status}`);
 					return `Error: Failed to download file from Telegram. Status: ${downloadRes.status}`;
 				}
 				const arrayBuffer = await downloadRes.arrayBuffer();
 				const base64Content = arrayBufferToBase64(arrayBuffer);
+				console.log(`[read_telegram_file] File downloaded from Telegram. Base64 length: ${base64Content.length} bytes`);
 
 				const sandbox = getSandbox(sandboxBinding, userId);
 				const safeFileName = file_name.replace(/[^a-zA-Z0-9.-]/g, '_');
@@ -62,6 +66,7 @@ export const createTelegramFileReaderTool = (
 				while (retries > 0) {
 					try {
 						await sandbox.writeFile(sandboxPath, base64Content, { encoding: 'base64' });
+						console.log(`[read_telegram_file] sandbox.writeFile completed for path: ${sandboxPath}`);
 						break;
 					} catch (err) {
 						retries--;
@@ -71,6 +76,7 @@ export const createTelegramFileReaderTool = (
 					}
 				}
 
+				console.log(`[read_telegram_file] Starting Python parser in sandbox...`);
 				const pythonCode = `
 import sys
 import os
@@ -86,7 +92,7 @@ def process_file(file_path, supports_vision):
             import pypdf
         except ImportError:
             import subprocess
-            subprocess.run([sys.executable, "-m", "pip", "install", "pypdf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run([sys.executable, "-m", "pip", "install", "pypdf", "--no-cache-dir", "--no-input", "--disable-pip-version-check", "--quiet", "--timeout", "15"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             import pypdf
         try:
             reader = pypdf.PdfReader(file_path)
@@ -109,7 +115,7 @@ def process_file(file_path, supports_vision):
                         import fitz
                     except ImportError:
                         import subprocess
-                        subprocess.run([sys.executable, "-m", "pip", "install", "pymupdf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        subprocess.run([sys.executable, "-m", "pip", "install", "pymupdf", "--no-cache-dir", "--no-input", "--disable-pip-version-check", "--quiet", "--timeout", "15"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         import fitz
                     doc = fitz.open(file_path)
                     for page in doc[:5]:
@@ -125,7 +131,7 @@ def process_file(file_path, supports_vision):
             import docx
         except ImportError:
             import subprocess
-            subprocess.run([sys.executable, "-m", "pip", "install", "python-docx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run([sys.executable, "-m", "pip", "install", "python-docx", "--no-cache-dir", "--no-input", "--disable-pip-version-check", "--quiet", "--timeout", "15"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             import docx
         try:
             doc = docx.Document(file_path)
@@ -138,7 +144,7 @@ def process_file(file_path, supports_vision):
             import pptx
         except ImportError:
             import subprocess
-            subprocess.run([sys.executable, "-m", "pip", "install", "python-pptx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run([sys.executable, "-m", "pip", "install", "python-pptx", "--no-cache-dir", "--no-input", "--disable-pip-version-check", "--quiet", "--timeout", "15"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             import pptx
         try:
             prs = pptx.Presentation(file_path)
@@ -169,6 +175,7 @@ print(json.dumps(res))
 				const execResult = await sandbox.runCode(pythonCode, { language: 'python' });
 				const stdout = execResult.logs.stdout.join('');
 				const stderr = execResult.logs.stderr.join('');
+				console.log(`[read_telegram_file] Python execution done. Error: ${execResult.error ? execResult.error.message : 'none'}. Stdout size: ${stdout.length}, Stderr size: ${stderr.length}`);
 
 				if (execResult.error) {
 					console.error(`[read_telegram_file] Python error:`, execResult.error);
