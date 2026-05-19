@@ -241,10 +241,15 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 				const largestPhoto = photo[photo.length - 1];
 				const file = await conversation.external(() => ctx.api.getFile(largestPhoto.file_id));
 				const fileUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
-				const fileRes = await conversation.external(() => fetch(fileUrl));
-				if (fileRes.ok) {
-					const arrayBuffer = await fileRes.arrayBuffer();
-					const base64Data = arrayBufferToBase64(arrayBuffer);
+				const base64Data = await conversation.external(async () => {
+					const fileRes = await fetch(fileUrl);
+					if (fileRes.ok) {
+						const arrayBuffer = await fileRes.arrayBuffer();
+						return arrayBufferToBase64(arrayBuffer);
+					}
+					return null;
+				});
+				if (base64Data) {
 					geminiParts.push({
 						inlineData: {
 							mimeType: 'image/jpeg',
