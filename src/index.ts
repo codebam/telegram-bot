@@ -362,7 +362,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 					const modelId = modelConfig.id;
 
-					const responseContent = await streamAiResponseToTelegram(
+					const responseContent = await conversation.external(() => streamAiResponseToTelegram(
 						ctx,
 						env.AI,
 						modelId,
@@ -388,7 +388,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 							createTelegramFileReaderTool(env, env.Sandbox, String(userId), messages, modelId),
 							createTelegramFileSearchTool(env, modelId),
 						],
-					);
+					));
 
 					if (responseContent) {
 						history.push({ role: 'user', content: prompt });
