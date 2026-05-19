@@ -253,6 +253,12 @@ export async function customRunWithTools(
 
 			const options: Record<string, unknown> = {
 				messages: msgs.map((m) => {
+					if (m.role === 'tool') {
+						return {
+							role: 'user',
+							content: `[Tool Response: ${m.name || 'unknown'}]\n${m.content || ''}`
+						};
+					}
 					// Ensure content is not null (use empty string if empty/null) to prevent schema validation crashes
 					const cleanMessage = { ...m };
 					if (cleanMessage.content === null || cleanMessage.content === undefined) {
