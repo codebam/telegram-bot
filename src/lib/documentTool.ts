@@ -24,10 +24,10 @@ function extractPrintableStrings(buffer: ArrayBuffer): string {
 }
 
 function truncateFileContent(text: string): string {
-	const LIMIT = 5000;
+	const LIMIT = 4000;
 	if (text.length > LIMIT) {
 		console.log(`[parseTelegramFile] Truncating parsed file content from ${text.length} to ${LIMIT} characters.`);
-		return text.slice(0, LIMIT) + '\n\n[Document content truncated to first 5000 characters due to token/size limits.]';
+		return text.slice(0, LIMIT) + '\n\n[Document content truncated to first 4000 characters due to token/size limits.]';
 	}
 	return text;
 }
