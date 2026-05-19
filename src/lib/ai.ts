@@ -487,8 +487,9 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 		const decoder = new TextDecoder();
 		let buffer = '';
 		let chunkCount = 0;
+		let streamFinished = false;
 		try {
-			while (true) {
+			while (!streamFinished) {
 				const { done, value } = await reader.read();
 				if (done) {
 					console.log(`[runStream] Stream closed after ${chunkCount} chunks.`);
@@ -505,7 +506,10 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 					if (!trimmed) continue;
 					if (trimmed.startsWith('data: ')) {
 						const data = trimmed.substring(6);
-						if (data === '[DONE]') break;
+						if (data === '[DONE]') {
+							streamFinished = true;
+							break;
+						}
 						try {
 							const parsed = JSON.parse(data);
 							
@@ -642,7 +646,7 @@ export async function streamAiResponseToTelegram(
 	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
 		await sendMessageDraft(token, {
 			chat_id: task.chatId,
-			text: 'Thinking...',
+			text: 'Thinking',
 			parse_mode: 'HTML',
 			message_thread_id: task.threadId,
 			business_connection_id: task.businessConnectionId,
@@ -669,7 +673,7 @@ export async function streamAiResponseToTelegram(
 				if (now - lastDraftUpdate > 2000) {
 					const text = streamContent 
 						? await markdownToHtml(streamContent + '...') 
-						: (hasSeenReasoning ? 'Reasoning...' : 'Thinking...');
+						: (hasSeenReasoning ? 'Reasoning' : 'Thinking');
 						
 					await sendMessageDraft(token, {
 						chat_id: task.chatId,
