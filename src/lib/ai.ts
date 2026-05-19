@@ -260,18 +260,27 @@ export async function customRunWithTools(
 			const options: Record<string, unknown> = {
 				messages: msgs.map((m) => {
 					// Ensure content is not null (use empty string if empty/null)
-					const cleanMessage = { ...m };
+					const cleanMessage: any = { ...m };
 					if (cleanMessage.content === null || cleanMessage.content === undefined) {
 						cleanMessage.content = '';
+					}
+					// Mapping for legacy function calling
+					if (cleanMessage.role === 'tool') {
+						cleanMessage.role = 'function';
+						cleanMessage.name = m.name;
+						delete cleanMessage.tool_call_id;
+					}
+					if (cleanMessage.role === 'assistant' && cleanMessage.tool_calls?.length > 0) {
+						cleanMessage.function_call = cleanMessage.tool_calls[0].function;
+						delete cleanMessage.tool_calls;
 					}
 					// Remove internal geminiParts before sending to CF
 					delete cleanMessage.geminiParts;
 					return cleanMessage;
 				}),
-				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
+				functions: (!omitTools && cfTools.length > 0) ? cfTools : undefined,
+				function_call: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
 				stream,
-				parallel_tool_calls: (!omitTools && cfTools.length > 0) ? false : undefined,
-				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
 			};
 
 			console.log(`[customRunWithTools] Calling ai.run with options:`, JSON.stringify({

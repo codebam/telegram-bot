@@ -131,11 +131,11 @@ async function chargeStars(
 	const balance = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
 
 	const modelPreference =
-		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'glm-4.7-flash';
-	const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['glm-4.7-flash'];
+		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'kimi-k2.6';
+	const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['kimi-k2.6'];
 
 	if (task.type === 'tool_call' && !modelConfig.supportsTools) {
-		task.modelId = AVAILABLE_MODELS['glm-4.7-flash'].id;
+		task.modelId = AVAILABLE_MODELS['kimi-k2.6'].id;
 	} else if ((task.type === 'photo' || task.geminiParts?.some((p) => p.inlineData)) && !modelConfig.supportsVision) {
 		task.modelId = AVAILABLE_MODELS['google/gemini-3.1-flash-lite'].id;
 	} else {
@@ -278,11 +278,11 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 			const { balance, modelPreference } = await conversation.external(async () => {
 				const b = await getBalance(billingUserId || 0, env.CONVERSATION_HISTORY);
-				const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'glm-4.7-flash';
+				const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'kimi-k2.6';
 				return { balance: b, modelPreference: mp };
 			});
 
-			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['glm-4.7-flash'];
+			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['kimi-k2.6'];
 
 			if (ctx.message?.document) {
 				const doc = ctx.message.document;
@@ -308,7 +308,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 					await ctx.reply(
 						`⚠️ Your current model (<b>${modelPreference}</b>) does not support vision/images.\n\n` +
 							`Please switch to a vision-enabled model using:\n` +
-							`- <code>/model glm-4.7-flash</code> (10 Stars)\n` +
+							`- <code>/model kimi-k2.6</code> (40 Stars)\n` +
 							`- <code>/model gemma4</code> (10 Stars)\n` +
 							`- <code>/model google/gemini-3.1-flash-lite</code> (10 Stars)\n` +
 							`- <code>/model llama-3.2-vision</code> (10 Stars)\n` +
@@ -551,7 +551,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 					await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
 				}
 			} else {
-				const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'glm-4.7-flash';
+				const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'kimi-k2.6';
 				await ctx.reply(
 					`Current model: <b>${currentModel}</b>\n\n` +
 						`Available models:\n` +

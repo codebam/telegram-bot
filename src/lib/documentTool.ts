@@ -153,7 +153,7 @@ export async function parseTelegramFile(
 		await env.CONVERSATION_HISTORY.put(introKey, rawText.substring(0, 3000), { expirationTtl: 86400 * 7 });
 
 		// RAG flow for large files
-		if (rawText.length >= 5000 && env.VECTORIZE) {
+		if (rawText.length >= 30000 && env.VECTORIZE) {
 			const indexedKey = `indexed:${file_id}`;
 			const isAlreadyIndexed = await env.CONVERSATION_HISTORY.get(indexedKey);
 			if (isAlreadyIndexed) {
@@ -233,8 +233,7 @@ export const createTelegramFileReaderTool = (
 ) => {
 	const modelConfig = Object.values(AVAILABLE_MODELS).find((cfg) => cfg.id === modelId);
 	const supportsVision = modelConfig?.supportsVision || false;
-	const isSelfHosted = modelId.startsWith('@cf/');
-	const limit = isSelfHosted ? 2000 : 12000;
+	const limit = 50000;
 
 	return {
 		name: 'read_telegram_file',
