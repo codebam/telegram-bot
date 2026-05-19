@@ -259,26 +259,13 @@ export async function customRunWithTools(
 
 			const options: Record<string, unknown> = {
 				messages: msgs.map((m) => {
-					if (m.role === 'tool') {
-						return {
-							role: 'user',
-							content: `[Tool Response: ${m.name || 'unknown'}]\n${m.content || ''}`
-						};
-					}
-					// Ensure content is not null (use empty string if empty/null) to prevent schema validation crashes
+					// Ensure content is not null (use empty string if empty/null)
 					const cleanMessage = { ...m };
 					if (cleanMessage.content === null || cleanMessage.content === undefined) {
 						cleanMessage.content = '';
 					}
-					// Strip tool_calls from history to prevent serverless GPU parser crashes when tool responses are mapped to user roles
-					// Fill empty assistant messages with a descriptive placeholder to prevent serverless template parser hangs on empty turns
-					if ('tool_calls' in cleanMessage) {
-						delete cleanMessage.tool_calls;
-						if (!cleanMessage.content || !cleanMessage.content.trim()) {
-							const toolNames = m.tool_calls?.map((tc: any) => tc.function?.name).join(', ') || 'tool';
-							cleanMessage.content = `[Executing tool: ${toolNames}]`;
-						}
-					}
+					// Remove internal geminiParts before sending to CF
+					delete cleanMessage.geminiParts;
 					return cleanMessage;
 				}),
 				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
