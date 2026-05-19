@@ -219,6 +219,7 @@ export async function customRunWithTools(
 				}),
 				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
 				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
+				max_tokens: 65536,
 				max_completion_tokens: 65536,
 				stream,
 			};
