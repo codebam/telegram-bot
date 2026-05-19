@@ -465,14 +465,18 @@ export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMe
 	if (response instanceof ReadableStream) {
 		const reader = response.getReader();
 		const decoder = new TextDecoder();
+		let buffer = '';
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
-			const chunk = decoder.decode(value);
-			const lines = chunk.split('\n');
+			buffer += decoder.decode(value, { stream: true });
+			const lines = buffer.split('\n');
+			buffer = lines.pop() || '';
+
 			for (const line of lines) {
-				if (line.startsWith('data: ')) {
-					const data = line.substring(6);
+				const trimmed = line.trim();
+				if (trimmed.startsWith('data: ')) {
+					const data = trimmed.substring(6);
 					if (data === '[DONE]') break;
 					try {
 						const parsed = JSON.parse(data);
