@@ -795,6 +795,14 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 
 		await chargeStars(ctx, { type: 'message', prompt });
 	});
+
+	bot.catch((err) => {
+		const ctx = err.ctx;
+		console.error(`[Grammy-Error] Error while handling update ${ctx?.update?.update_id}:`, err.error);
+		if (err instanceof Error) {
+			console.error(`[Grammy-Error] Stack trace:\n${err.stack}`);
+		}
+	});
 }
 
 export default {

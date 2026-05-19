@@ -573,14 +573,20 @@ export async function streamAiResponseToTelegram(
 		} catch (e) {
 			console.error('[streamAiResponseToTelegram] Error during AI streaming:', e);
 		}
-
 		console.log(`[streamAiResponseToTelegram] Stream finished. Content length: ${streamContent.length}`);
+
+		// Safely truncate streamContent to avoid exceeding Telegram's 4096 character limit
+		const TEXT_LIMIT = 3800;
+		if (streamContent.length > TEXT_LIMIT) {
+			console.log(`[streamAiResponseToTelegram] Content length (${streamContent.length}) exceeds limit. Truncating...`);
+			streamContent = streamContent.slice(0, TEXT_LIMIT) + '\n\n[Truncated due to Telegram length limit]';
+		}
 
 		if (streamContent.trim()) {
 			if (task.updateType === 'guest_message') {
 				if (task.guestQueryId) {
 					console.log('[streamAiResponseToTelegram] Answering guest_message via answerGuestQuery');
-					const messageText = (await markdownToHtml(streamContent)).slice(0, 4096);
+					const messageText = await markdownToHtml(streamContent);
 					await ctx.api
 						.answerGuestQuery(task.guestQueryId, {
 							type: 'article',
@@ -595,7 +601,17 @@ export async function streamAiResponseToTelegram(
 				} else {
 					console.log('[streamAiResponseToTelegram] guest_message has no guestQueryId, cannot answer');
 				}
-			} else if (task.updateType !== 'business_message') {
+			} else if (task.updateType === 'business_message') {
+				console.log('[streamAiResponseToTelegram] Sending final sendMessage for business_message');
+				await ctx.api
+					.sendMessage(task.chatId!, await markdownToHtml(streamContent), {
+						parse_mode: 'HTML',
+						message_thread_id: task.threadId,
+						business_connection_id: task.businessConnectionId,
+						reply_to_message_id: task.messageId,
+					})
+					.catch((e: unknown) => console.log('Error sending final business message:', e));
+			} else {
 				console.log('[streamAiResponseToTelegram] Sending final sendMessageDraft and sendMessage');
 				await sendMessageDraft(token, {
 					chat_id: task.chatId,
