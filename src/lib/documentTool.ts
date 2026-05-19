@@ -245,20 +245,39 @@ export const createTelegramFileSearchTool = (
 			properties: {
 				file_id: { type: 'string', description: 'The Telegram file_id of the document' },
 				query: { type: 'string', description: 'The semantic search query to look up inside the document' },
+				file_name: { type: 'string', description: 'The original name of the file' },
 			},
 			required: ['file_id', 'query'],
 		},
-		function: async ({ file_id, query }: { file_id: string; query: string }) => {
+		function: async ({ file_id, query, file_name }: { file_id: string; query: string; file_name?: string }) => {
 			try {
 				if (!env.VECTORIZE) {
 					return 'Error: Vectorize index is not bound in this environment.';
+				}
+
+				// Ensure the file is indexed on-the-fly if not already cached in KV
+				const introKey = `doc_intro:${file_id}`;
+				let intro = await env.CONVERSATION_HISTORY.get<string>(introKey);
+				if (!intro) {
+					console.log(`[search_telegram_file] File ${file_id} not indexed in KV yet. Running parseTelegramFile on-the-fly...`);
+					const parseResult = await parseTelegramFile(
+						env,
+						undefined,
+						'',
+						file_id,
+						file_name || 'document.md',
+						false,
+						undefined,
+						5000
+					);
+					console.log(`[search_telegram_file] On-the-fly indexing result:`, parseResult);
+					intro = await env.CONVERSATION_HISTORY.get<string>(introKey);
 				}
 
 				// Intercept generic summary / overview queries and immediately return cached document intro
 				const isGenericQuery = /summary|overview|about|what is this|description/i.test(query);
 				if (isGenericQuery) {
 					console.log(`[search_telegram_file] Intercepted generic summary/overview query: "${query}"`);
-					const intro = await env.CONVERSATION_HISTORY.get(`doc_intro:${file_id}`);
 					if (intro) {
 						return `[Document Overview / Introduction]:\n\n${intro}`;
 					}
