@@ -465,17 +465,28 @@ export async function sendMessageDraft(token: string, data: Record<string, unkno
  * Get AI stream for a model.
  */
 export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = []) {
+	console.log(`[getAiStream] Calling customRunWithTools for model ${model}...`);
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
+	console.log(`[getAiStream] customRunWithTools returned. isReadableStream: ${response instanceof ReadableStream}`);
 	const filter = createThinkFilter();
 
 	if (response instanceof ReadableStream) {
 		const reader = response.getReader();
 		const decoder = new TextDecoder();
 		let buffer = '';
+		let chunkCount = 0;
 		while (true) {
 			const { done, value } = await reader.read();
-			if (done) break;
-			buffer += decoder.decode(value, { stream: true });
+			if (done) {
+				console.log(`[getAiStream] reader.read() DONE. total chunks: ${chunkCount}`);
+				break;
+			}
+			chunkCount++;
+			const decoded = decoder.decode(value, { stream: true });
+			if (chunkCount <= 3 || chunkCount % 10 === 0) {
+				console.log(`[getAiStream] Read chunk ${chunkCount}: ${decoded.length} bytes`);
+			}
+			buffer += decoded;
 			const lines = buffer.split('\n');
 			buffer = lines.pop() || '';
 
@@ -483,7 +494,10 @@ export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMe
 				const trimmed = line.trim();
 				if (trimmed.startsWith('data: ')) {
 					const data = trimmed.substring(6);
-					if (data === '[DONE]') break;
+					if (data === '[DONE]') {
+						console.log(`[getAiStream] Received [DONE] signal`);
+						break;
+					}
 					try {
 						const parsed = JSON.parse(data);
 						const text = extractText(parsed);
@@ -491,8 +505,8 @@ export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMe
 							const filtered = filter.push(text);
 							if (filtered) yield filtered;
 						}
-					} catch {
-						// Ignore malformed JSON chunks
+					} catch (e) {
+						console.error(`[getAiStream] JSON parse error on chunk: ${data.slice(0, 100)}... Error: ${String(e)}`);
 					}
 				}
 			}
