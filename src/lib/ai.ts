@@ -606,7 +606,7 @@ export async function streamAiResponseToTelegram(
 	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
 		await sendMessageDraft(token, {
 			chat_id: task.chatId,
-			text: 'Thinking',
+			text: '>Thinking',
 			parse_mode: 'MarkdownV2',
 			message_thread_id: task.threadId,
 			business_connection_id: task.businessConnectionId,
@@ -642,7 +642,7 @@ export async function streamAiResponseToTelegram(
 				if (now - lastDraftUpdate > 2000) {
 					const text = (streamContent || reasoningContent || thinkingContent)
 						? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''))
-						: (hasSeenReasoning ? 'Reasoning' : 'Thinking');
+						: (hasSeenReasoning ? '>Reasoning' : '>Thinking');
 						
 					await sendMessageDraft(token, {
 						chat_id: task.chatId,
@@ -695,12 +695,15 @@ export async function streamAiResponseToTelegram(
 				if (
 					task.updateType !== 'guest_message' &&
 					task.updateType !== 'business_message' &&
-					Date.now() - lastUpdate.time > 2000 &&
-					(streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
+					Date.now() - lastUpdate.time > 2000
 				) {
+					const text = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
+						? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''))
+						: (hasSeenReasoning ? '>Reasoning' : '>Thinking');
+
 					await sendMessageDraft(token, {
 						chat_id: task.chatId,
-						text: await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : '')),
+						text,
 						parse_mode: 'MarkdownV2',
 						message_thread_id: task.threadId,
 						business_connection_id: task.businessConnectionId,
