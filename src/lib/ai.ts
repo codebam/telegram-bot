@@ -464,10 +464,9 @@ export async function sendMessageDraft(token: string, data: Record<string, unkno
 /**
  * Get AI stream for a model.
  */
-export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = []) {
-	console.log(`[getAiStream] Calling customRunWithTools for model ${model}...`);
+async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = []): AsyncGenerator<string, void, unknown> {
+	console.log(`[runStream] Starting stream for model: ${model}`);
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
-	console.log(`[getAiStream] customRunWithTools returned. isReadableStream: ${response instanceof ReadableStream}`);
 	const filter = createThinkFilter();
 
 	if (response instanceof ReadableStream) {
@@ -475,47 +474,88 @@ export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMe
 		const decoder = new TextDecoder();
 		let buffer = '';
 		let chunkCount = 0;
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) {
-				console.log(`[getAiStream] reader.read() DONE. total chunks: ${chunkCount}`);
-				break;
-			}
-			chunkCount++;
-			const decoded = decoder.decode(value, { stream: true });
-			if (chunkCount <= 3 || chunkCount % 10 === 0) {
-				console.log(`[getAiStream] Read chunk ${chunkCount}: ${decoded.length} bytes`);
-			}
-			buffer += decoded;
-			const lines = buffer.split('\n');
-			buffer = lines.pop() || '';
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				chunkCount++;
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() || '';
 
-			for (const line of lines) {
-				const trimmed = line.trim();
-				if (trimmed.startsWith('data: ')) {
-					const data = trimmed.substring(6);
-					if (data === '[DONE]') {
-						console.log(`[getAiStream] Received [DONE] signal`);
-						break;
-					}
-					try {
-						const parsed = JSON.parse(data);
-						const text = extractText(parsed);
-						if (text) {
-							const filtered = filter.push(text);
-							if (filtered) yield filtered;
+				for (const line of lines) {
+					const trimmed = line.trim();
+					if (trimmed.startsWith('data: ')) {
+						const data = trimmed.substring(6);
+						if (data === '[DONE]') break;
+						try {
+							const parsed = JSON.parse(data);
+							const text = extractText(parsed);
+							if (text) {
+								const filtered = filter.push(text);
+								if (filtered) yield filtered;
+							}
+						} catch {
+							// Ignore parsing chunks
 						}
-					} catch (e) {
-						console.error(`[getAiStream] JSON parse error on chunk: ${data.slice(0, 100)}... Error: ${String(e)}`);
 					}
 				}
+			}
+		} finally {
+			try {
+				reader.releaseLock();
+			} catch {
+				// Safety release
 			}
 		}
 		const tail = filter.end();
 		if (tail) yield tail;
 	} else {
-		console.log('[getAiStream] aiResponse is not a stream, yielding extractText(aiResponse)');
 		yield stripThinking(extractText(response));
+	}
+}
+
+/**
+ * Get AI stream for a model with automatic Gemini fallback.
+ */
+export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = []): AsyncGenerator<string, void, unknown> {
+	const fallbackModel = 'google/gemini-3.1-flash-lite';
+	if (model === fallbackModel) {
+		yield* runStream(ai, model, messages, tools);
+		return;
+	}
+
+	try {
+		console.log(`[getAiStream] Attempting primary model: ${model}`);
+		const iterator = runStream(ai, model, messages, tools)[Symbol.asyncIterator]();
+
+		const timeoutPromise = new Promise<never>((_, reject) =>
+			setTimeout(() => reject(new Error('TTFT_TIMEOUT')), 7000)
+		);
+
+		const firstResult = await Promise.race([
+			iterator.next(),
+			timeoutPromise
+		]);
+
+		if (firstResult.done) {
+			return;
+		}
+
+		yield firstResult.value;
+
+		while (true) {
+			const res = await iterator.next();
+			if (res.done) {
+				break;
+			}
+			yield res.value;
+		}
+	} catch (err) {
+		console.error(`[getAiStream] Primary model ${model} timed out or failed. Error:`, err);
+		console.log(`[getAiStream] Triggering automatic fallback to ${fallbackModel}...`);
+		yield `\n\n⚠️ <i>Model ${model} timed out. Falling back to Gemini...</i>\n\n`;
+		yield* runStream(ai, fallbackModel, messages, tools);
 	}
 }
 
