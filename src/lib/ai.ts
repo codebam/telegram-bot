@@ -480,8 +480,13 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 					break;
 				}
 				chunkCount++;
-				const chunkStr = decoder.decode(value, { stream: true });
-				buffer += chunkStr;
+				buffer += decoder.decode(value, { stream: true });
+				
+				// Only process if we have a newline or the buffer is getting large
+				if (!buffer.includes('\n') && buffer.length < 1024) {
+					continue;
+				}
+
 				const lines = buffer.split('\n');
 				buffer = lines.pop() || '';
 
