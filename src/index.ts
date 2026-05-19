@@ -82,9 +82,10 @@ async function chargeStars(
 	let userId: number | string | undefined = ctx.from?.id;
 	let billingUserId = ctx.from?.id;
 
-	if (ctx.update.business_message) {
-		const connectionId = ctx.update.business_message?.business_connection_id;
-		const customerId = ctx.update.business_message?.chat.id;
+	if (ctx.has('business_message')) {
+		const bizMsg = ctx.businessMessage;
+		const connectionId = bizMsg.business_connection_id;
+		const customerId = bizMsg.chat.id;
 		if (connectionId && customerId) {
 			userId = `business:${connectionId}:${customerId}`;
 			const ownerData = await getBusinessOwnerData(ctx.api, ctx.env, connectionId);
@@ -101,16 +102,13 @@ async function chargeStars(
 
 	task.userId = userId;
 	task.senderId = ctx.from?.id || ctx.update.guest_message?.from?.id;
-	task.chatId = ctx.chat?.id.toString() || ctx.update.guest_message?.chat?.id?.toString();
+	task.chatId = ctx.chatId?.toString() || ctx.update.guest_message?.chat?.id?.toString();
 	task.updateId = ctx.update.update_id;
-	task.messageId =
-		ctx.message?.message_id ??
-		ctx.update.business_message?.message_id ??
-		ctx.update.guest_message?.message_id;
+	task.messageId = ctx.msg?.message_id || ctx.update.guest_message?.message_id;
 	task.updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
 	task.guestQueryId = ctx.update.guest_message?.guest_query_id;
-	task.businessConnectionId = ctx.update.business_message?.business_connection_id?.toString();
-	task.threadId = ctx.message?.message_thread_id ?? ctx.update.business_message?.message_thread_id ?? ctx.update.guest_message?.message_thread_id;
+	task.businessConnectionId = ctx.businessMessage?.business_connection_id?.toString();
+	task.threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
 	
 	const balanceKey = `balance:${String(billingUserId)}`;
 	const balance = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
@@ -132,7 +130,7 @@ async function chargeStars(
 	if (balance >= amount) {
 		try {
 			await ctx.replyWithChatAction('typing', {
-				business_connection_id: ctx.update.business_message?.business_connection_id,
+				business_connection_id: ctx.businessMessage?.business_connection_id,
 			});
 		} catch (e) {
 			console.log('[chargeStars] Failed to send chat action (likely not a member):', e);
@@ -140,10 +138,10 @@ async function chargeStars(
 		await ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance - amount));
 		task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
 
-		if (ctx.update.business_message) {
+		if (ctx.has('business_message')) {
 			if (!task.systemPrompt) {
 				let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
-				const connectionId = ctx.update.business_message?.business_connection_id;
+				const connectionId = ctx.businessMessage.business_connection_id;
 				if (connectionId) {
 					const ownerData = await getBusinessOwnerData(ctx.api, ctx.env, connectionId);
 					if (ownerData) {
@@ -174,12 +172,12 @@ async function chargeStars(
 			params: task,
 		});
 	} else {
-		if (ctx.update.business_message || ctx.update.guest_message) {
+		if (ctx.has('business_message') || ctx.has('guest_message')) {
 			await ctx.reply(
 				'Insufficient balance. Please go to direct messages and use /load to top up your Stars.',
 				{
-					business_connection_id: ctx.update.business_message?.business_connection_id,
-					reply_to_message_id: ctx.update.business_message?.message_id,
+					business_connection_id: ctx.businessMessage?.business_connection_id,
+					reply_parameters: { message_id: ctx.msgId },
 				}
 			);
 		} else {
@@ -203,11 +201,12 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 		ctx.env = env;
 		ctx.executionCtx = executionCtx;
 		let userId: number | string = ctx.from!.id;
-		const threadId = ctx.message?.message_thread_id || ctx.update.business_message?.message_thread_id;
+		const threadId = ctx.msg?.message_thread_id;
 
-		if (ctx.update.business_message) {
-			const connectionId = ctx.update.business_message?.business_connection_id;
-			const customerId = ctx.update.business_message?.chat.id;
+		if (ctx.has('business_message')) {
+			const bizMsg = ctx.businessMessage;
+			const connectionId = bizMsg.business_connection_id;
+			const customerId = bizMsg.chat.id;
 			if (connectionId && customerId) {
 				userId = `business:${connectionId}:${customerId}`;
 			}
@@ -220,10 +219,10 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 		})) || [];
 
 		while (true) {
-			let prompt = ctx.message?.text || ctx.message?.caption || ctx.update.business_message?.text || ctx.update.business_message?.caption || '';
+			let prompt = ctx.msg?.text || ctx.msg?.caption || '';
 
 			const geminiParts: GeminiPart[] = [];
-			const photo = ctx.message?.photo || ctx.update.business_message?.photo;
+			const photo = ctx.msg?.photo;
 			if (photo) {
 				const largestPhoto = photo[photo.length - 1];
 				const file = await conversation.external(() => ctx.api.getFile(largestPhoto.file_id));
@@ -251,8 +250,8 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 			let billingUserId = ctx.from?.id;
 			let ownerData: { id: number; name: string; username?: string } | null = null;
-			if (ctx.update.business_message) {
-				const connectionId = ctx.update.business_message?.business_connection_id;
+			if (ctx.has('business_message')) {
+				const connectionId = ctx.businessMessage.business_connection_id;
 				if (connectionId) {
 					ownerData = await conversation.external(() => getBusinessOwnerData(ctx.api, env, connectionId));
 					if (ownerData?.id) {
@@ -269,12 +268,12 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['kimi-k2.6'];
 
-			if (ctx.message?.document) {
-				const doc = ctx.message.document;
+			if (ctx.msg?.document) {
+				const doc = ctx.msg.document;
 				prompt = `[Uploaded Document: Name="${doc.file_name || 'document'}", MIME="${doc.mime_type || ''}", FileID="${doc.file_id}"]\n\n${prompt || 'Please process this document.'}`;
 			}
 
-			const replyToMessage = ctx.message?.reply_to_message || ctx.update.business_message?.reply_to_message;
+			const replyToMessage = ctx.msg?.reply_to_message;
 			if (replyToMessage) {
 				if (replyToMessage.document) {
 					const replyDoc = replyToMessage.document;
@@ -309,7 +308,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 				if (balance >= amount) {
 					try {
 						await ctx.replyWithChatAction('typing', {
-							business_connection_id: ctx.update.business_message?.business_connection_id,
+							business_connection_id: ctx.businessMessage?.business_connection_id,
 						});
 					} catch (e) {
 						console.error('[chatConversation] Failed to send chat action:', e);
@@ -318,7 +317,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 					await conversation.external(() => env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance - amount)));
 
 					const systemPrompt = await conversation.external(async () => {
-						if (ctx.update.business_message) {
+						if (ctx.has('business_message')) {
 							let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
 							if (ownerData) {
 								prompt = prompt.replace(/{owner_name}/g, ownerData.name);
@@ -329,7 +328,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 							}
 							return prompt;
 						}
-						const isFileTask = !!ctx.message?.document || !!(replyToMessage && replyToMessage.document);
+						const isFileTask = !!ctx.msg?.document || !!(replyToMessage && replyToMessage.document);
 						if (isFileTask) {
 							return 'You are a helpful assistant running on Telegram. Ensure your responses are formatted using supported Telegram MarkdownV2.';
 						}
@@ -350,13 +349,13 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 					await conversation.external(async () => {
 						await ctx.env.STREAM_WORKFLOW.create({
 							params: {
-								type: ctx.update.business_message ? 'business_message' : 'message',
-								updateType: ctx.update.business_message ? 'business_message' : 'message',
+								type: ctx.has('business_message') ? 'business_message' : 'message',
+								updateType: ctx.has('business_message') ? 'business_message' : 'message',
 								prompt,
-								chatId: ctx.chat?.id.toString(),
+								chatId: ctx.chatId?.toString(),
 								threadId,
-								businessConnectionId: ctx.update.business_message?.business_connection_id?.toString(),
-								messageId: ctx.message?.message_id || ctx.update.business_message?.message_id,
+								businessConnectionId: ctx.businessMessage?.business_connection_id?.toString(),
+								messageId: ctx.msgId,
 								userId: String(userId),
 								systemPrompt,
 								history,
@@ -453,10 +452,8 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	commands.command('balance', 'Check your current Star balance', async (ctx) => {
-		if (ctx.from) {
-			const balance = await getBalance(ctx.from.id, ctx.env.CONVERSATION_HISTORY);
-			await ctx.reply(`Your current balance is ${String(balance)} Stars.`);
-		}
+		const balance = await getBalance(ctx.from?.id || 0, ctx.env.CONVERSATION_HISTORY);
+		await ctx.reply(`Your current balance is ${String(balance)} Stars.`);
 	});
 
 	commands.command('load', 'Top up your balance with Telegram Stars', async (ctx) => {
@@ -480,20 +477,19 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	commands.command('clear', 'Clear your conversation history', async (ctx) => {
-		if (ctx.from) {
-			const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
-			let historyUserId: number | string = ctx.from.id;
-			if (ctx.update.business_message) {
-				const connectionId = ctx.update.business_message?.business_connection_id;
-				const customerId = ctx.update.business_message?.chat.id;
-				if (connectionId && customerId) {
-					historyUserId = `business:${connectionId}:${customerId}`;
-				}
+		const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
+		let historyUserId: number | string = ctx.from?.id || 0;
+		if (ctx.update.business_message) {
+			const bizMsg = ctx.update.business_message;
+			const connectionId = bizMsg.business_connection_id;
+			const customerId = bizMsg.chat.id;
+			if (connectionId && customerId) {
+				historyUserId = `business:${connectionId}:${customerId}`;
 			}
-			const threadId = ctx.message?.message_thread_id ?? ctx.update.guest_message?.message_thread_id;
-			await historyManager.clearHistory(historyUserId, threadId);
-			await ctx.reply('History cleared');
 		}
+		const threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
+		await historyManager.clearHistory(historyUserId, threadId);
+		await ctx.reply('History cleared');
 	});
 
 	commands.command('code', 'Generate code snippets', async (ctx) => {
@@ -516,96 +512,93 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	commands.command('model', 'Switch AI model and see costs', async (ctx) => {
-		if (ctx.from) {
-			const modelKey = `model:${String(ctx.from.id)}`;
-			const selectedModel = ctx.match?.toLowerCase();
-			if (selectedModel) {
-				if (selectedModel in AVAILABLE_MODELS) {
-					await ctx.env.CONVERSATION_HISTORY.put(modelKey, selectedModel);
-					await ctx.reply(`Model updated to <b>${selectedModel}</b>.`, { parse_mode: 'HTML' });
-				} else {
-					await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
-				}
+		const modelKey = `model:${String(ctx.from?.id)}`;
+		const selectedModel = ctx.match?.toLowerCase();
+		if (selectedModel) {
+			if (selectedModel in AVAILABLE_MODELS) {
+				await ctx.env.CONVERSATION_HISTORY.put(modelKey, selectedModel);
+				await ctx.reply(`Model updated to <b>${selectedModel}</b>.`, { parse_mode: 'HTML' });
 			} else {
-				const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'kimi-k2.6';
-				await ctx.reply(
-					`Current model: <b>${currentModel}</b>\n\n` +
-						`Available models:\n` +
-						Object.entries(AVAILABLE_MODELS)
-							.map(([name, cfg]) => `- <code>${name}</code> (${String(cfg.cost)} Stars)`)
-							.join('\n'),
-					{ parse_mode: 'HTML' },
-				);
+				await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
 			}
+		} else {
+			const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'kimi-k2.6';
+			await ctx.reply(
+				`Current model: <b>${currentModel}</b>\n\n` +
+					`Available models:\n` +
+					Object.entries(AVAILABLE_MODELS)
+						.map(([name, cfg]) => `- <code>${name}</code> (${String(cfg.cost)} Stars)`)
+						.join('\n'),
+				{ parse_mode: 'HTML' },
+			);
 		}
 	});
 
 	commands.command('prompt', 'Set your custom system prompt', async (ctx) => {
-		if (ctx.from) {
-			let promptValue = ctx.match.trim();
-			if (promptValue === 'reset' || promptValue === '""' || promptValue === "''" || promptValue === '') {
-				await ctx.env.CONVERSATION_HISTORY.delete(`prompt:${String(ctx.from.id)}`);
-				await ctx.reply(`System prompt reset to default:\n\n${SYSTEM_PROMPTS.TUX_ROBOT}`);
-			} else {
-				if (
-					(promptValue.startsWith('"') && promptValue.endsWith('"')) ||
-					(promptValue.startsWith("'") && promptValue.endsWith("'"))
-				) {
-					promptValue = promptValue.substring(1, promptValue.length - 1);
-				}
-				await ctx.env.CONVERSATION_HISTORY.put(`prompt:${String(ctx.from.id)}`, promptValue);
-				await ctx.reply(`System prompt updated to:\n\n${promptValue}`);
+		let promptValue = ctx.match.trim();
+		const userId = String(ctx.from?.id);
+		if (promptValue === 'reset' || promptValue === '""' || promptValue === "''" || promptValue === '') {
+			await ctx.env.CONVERSATION_HISTORY.delete(`prompt:${userId}`);
+			await ctx.reply(`System prompt reset to default:\n\n${SYSTEM_PROMPTS.TUX_ROBOT}`);
+		} else {
+			if (
+				(promptValue.startsWith('"') && promptValue.endsWith('"')) ||
+				(promptValue.startsWith("'") && promptValue.endsWith("'"))
+			) {
+				promptValue = promptValue.substring(1, promptValue.length - 1);
 			}
+			await ctx.env.CONVERSATION_HISTORY.put(`prompt:${userId}`, promptValue);
+			await ctx.reply(`System prompt updated to:\n\n${promptValue}`);
 		}
 	});
 
 	commands.command('facts', 'Set facts about yourself for business mode', async (ctx) => {
-		if (ctx.from) {
-			let factsValue = ctx.match.trim();
-			const userId = ctx.from.id;
-			if (factsValue === 'reset' || factsValue === '""' || factsValue === "''" || factsValue === '') {
-				await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${String(userId)}`);
-				const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${userId}`);
-				if (connectionId) {
-					const ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
-						`business_connection:${connectionId}`,
-						'json',
-					);
-					if (ownerData) {
-						if (ownerData.username) {
-							await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${ownerData.username}`);
-						}
-						if (ownerData.name) {
-							await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${ownerData.name}`);
-						}
+		let factsValue = ctx.match.trim();
+		const userId = ctx.from?.id;
+		if (!userId) return;
+
+		if (factsValue === 'reset' || factsValue === '""' || factsValue === "''" || factsValue === '') {
+			await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${String(userId)}`);
+			const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${userId}`);
+			if (connectionId) {
+				const ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
+					`business_connection:${connectionId}`,
+					'json',
+				);
+				if (ownerData) {
+					if (ownerData.username) {
+						await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${ownerData.username}`);
+					}
+					if (ownerData.name) {
+						await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${ownerData.name}`);
 					}
 				}
-				await ctx.reply('Business facts cleared.');
-			} else {
-				if (
-					(factsValue.startsWith('"') && factsValue.endsWith('"')) ||
-					(factsValue.startsWith("'") && factsValue.endsWith("'"))
-				) {
-					factsValue = factsValue.substring(1, factsValue.length - 1);
-				}
-				await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${String(userId)}`, factsValue);
-				const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${userId}`);
-				if (connectionId) {
-					const ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
-						`business_connection:${connectionId}`,
-						'json',
-					);
-					if (ownerData) {
-						if (ownerData.username) {
-							await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${ownerData.username}`, factsValue);
-						}
-						if (ownerData.name) {
-							await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${ownerData.name}`, factsValue);
-						}
-					}
-				}
-				await ctx.reply(`Business facts updated to:\n\n${factsValue}`);
 			}
+			await ctx.reply('Business facts cleared.');
+		} else {
+			if (
+				(factsValue.startsWith('"') && factsValue.endsWith('"')) ||
+				(factsValue.startsWith("'") && factsValue.endsWith("'"))
+			) {
+				factsValue = factsValue.substring(1, factsValue.length - 1);
+			}
+			await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${String(userId)}`, factsValue);
+			const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${userId}`);
+			if (connectionId) {
+				const ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
+					`business_connection:${connectionId}`,
+					'json',
+				);
+				if (ownerData) {
+					if (ownerData.username) {
+						await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${ownerData.username}`, factsValue);
+					}
+					if (ownerData.name) {
+						await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${ownerData.name}`, factsValue);
+					}
+				}
+			}
+			await ctx.reply(`Business facts updated to:\n\n${factsValue}`);
 		}
 	});
 
@@ -623,7 +616,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	commands.command('stream', 'Stream incrementing numbers', async (ctx) => {
-		const chatId = ctx.chat?.id;
+		const chatId = ctx.chatId;
 		if (!chatId) return;
 
 		await ctx.env.STREAM_WORKFLOW.create({
@@ -729,21 +722,19 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	bot.on('business_connection', async (ctx) => {
-		const connection = ctx.update.business_connection;
-		if (connection) {
-			const ownerName = connection.user.first_name;
-			const username = connection.user.username;
-			const ownerId = connection.user.id;
-			await ctx.env.CONVERSATION_HISTORY.put(`active_connection:${ownerId}`, connection.id);
-			await ctx.env.CONVERSATION_HISTORY.put(
-				`business_connection:${connection.id}`,
-				JSON.stringify({
-					id: ownerId,
-					name: ownerName || 'the business owner',
-					username: username,
-				}),
-			);
-		}
+		const connection = ctx.businessConnection;
+		const ownerName = connection.user.first_name;
+		const username = connection.user.username;
+		const ownerId = connection.user.id;
+		await ctx.env.CONVERSATION_HISTORY.put(`active_connection:${ownerId}`, connection.id);
+		await ctx.env.CONVERSATION_HISTORY.put(
+			`business_connection:${connection.id}`,
+			JSON.stringify({
+				id: ownerId,
+				name: ownerName || 'the business owner',
+				username: username,
+			}),
+		);
 	});
 
 	bot.on('business_message', async (ctx) => {
@@ -755,13 +746,12 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	bot.on('guest_message', async (ctx) => {
-		const guestMessage = ctx.update.guest_message;
+		const guestMessage = ctx.update.guest_message!;
 		let prompt = guestMessage.text?.toString() ?? '';
 		const token = ctx.env.SECRET_TELEGRAM_API_TOKEN;
 		let botUsername = await ctx.env.CONVERSATION_HISTORY.get(`bot_username:${token.slice(0, 10)}`);
 		if (!botUsername) {
-			const me = await ctx.api.getMe();
-			botUsername = me.username;
+			botUsername = ctx.me.username;
 			await ctx.env.CONVERSATION_HISTORY.put(`bot_username:${token.slice(0, 10)}`, botUsername, {
 				expirationTtl: 86400,
 			});
