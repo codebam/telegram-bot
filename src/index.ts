@@ -1,4 +1,4 @@
-import { Bot, Api, Context, webhookCallback, session, GrammyError, HttpError } from 'grammy';
+import { Bot, Api, Context, webhookCallback, session, GrammyError, HttpError, InputFile } from 'grammy';
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { stream, type StreamFlavor } from '@grammyjs/stream';
@@ -345,20 +345,10 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 						];
 					}
 
-					const messages = [
-						{ role: 'system', content: systemPrompt },
-						...history,
-						userMessage,
-					];
-
 					const modelId = modelConfig.id;
 
-					const responseContent = await conversation.external(() => streamAiResponseToTelegram(
-						ctx,
-						env.AI,
-						modelId,
-						messages,
-						{
+					await conversation.external(() => ctx.env.STREAM_WORKFLOW.create({
+						params: {
 							type: ctx.update.business_message ? 'business_message' : 'message',
 							updateType: ctx.update.business_message ? 'business_message' : 'message',
 							prompt,
@@ -370,23 +360,9 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 							systemPrompt,
 							history,
 							telegramToken: env.SECRET_TELEGRAM_API_TOKEN,
+							modelId,
 						},
-						[
-							fetchTool,
-							wikipediaTool,
-							createTavilySearchTool(env.TAVILY_API_KEY || ''),
-							createSandboxTool(env.Sandbox, String(userId)),
-							createTelegramFileReaderTool(env, env.Sandbox, String(userId), messages, modelId),
-							createTelegramFileSearchTool(env, modelId),
-						],
-					));
-
-					if (responseContent) {
-						history.push({ role: 'user', content: prompt });
-						history.push({ role: 'assistant', content: responseContent });
-						// Sync back to KV
-						await conversation.external(() => new HistoryManager(env.CONVERSATION_HISTORY).addMessage(userId, prompt, responseContent, threadId));
-					}
+					}));
 				} else {
 					// Handle insufficient balance (omitted full logic for brevity, can call ctx.replyWithInvoice)
 					await ctx.reply('Insufficient balance. Please top up your Stars.');
@@ -489,6 +465,15 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			await ctx.replyWithInvoice('Stars Top-up', `Purchase ${String(amount)} Stars`, `load:${String(amount)}`, 'XTR', [
 				{ label: 'Stars', amount },
 			]);
+		}
+	});
+
+	commands.command('photo', 'Generate an image', async (ctx) => {
+		const prompt = ctx.match;
+		if (prompt) {
+			await chargeStars(ctx, { type: 'gen_photo', prompt }, 100);
+		} else {
+			await ctx.reply('Please provide a prompt for the photo. Example: /photo a futuristic city');
 		}
 	});
 
@@ -858,6 +843,59 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 		const botInstance = new Bot<MyContext>(token);
 		botInstance.api.config.use(autoRetry());
 
+		if (task.type === 'voice' && task.fileId) {
+			try {
+				const file = await botInstance.api.getFile(task.fileId);
+				const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+				const fileRes = await fetch(fileUrl);
+				if (fileRes.ok) {
+					const audioData = await fileRes.arrayBuffer();
+					const transcription = (await env.AI.run('@cf/openai/whisper', {
+						audio: [...new Uint8Array(audioData)],
+					})) as { text: string };
+					if (transcription.text) {
+						task.prompt = transcription.text;
+						task.type = 'message';
+					}
+				}
+			} catch (e) {
+				console.error('[processTask] Failed to transcribe voice:', e);
+				await botInstance.api.sendMessage(task.chatId!, 'Failed to transcribe voice message.', {
+					business_connection_id: task.businessConnectionId,
+					reply_parameters: { message_id: task.messageId! },
+				});
+				return;
+			}
+		}
+
+		if (task.type === 'gen_photo') {
+			try {
+				const response = (await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
+					prompt: task.prompt,
+				})) as { image: string };
+
+				if (response.image) {
+					const binaryString = atob(response.image);
+					const bytes = new Uint8Array(binaryString.length);
+					for (let i = 0; i < binaryString.length; i++) {
+						bytes[i] = binaryString.charCodeAt(i);
+					}
+					await botInstance.api.sendPhoto(task.chatId!, new InputFile(bytes, 'photo.png'), {
+						business_connection_id: task.businessConnectionId,
+						reply_parameters: { message_id: task.messageId! },
+					});
+					return;
+				}
+			} catch (e) {
+				console.error('[processTask] Failed to generate photo:', e);
+				await botInstance.api.sendMessage(task.chatId!, 'Failed to generate photo.', {
+					business_connection_id: task.businessConnectionId,
+					reply_parameters: { message_id: task.messageId! },
+				});
+				return;
+			}
+		}
+
 		const userMessage: ChatMessage = { role: 'user', content: task.prompt };
 		if (task.type === 'photo' && task.fileId) {
 			try {
@@ -922,38 +960,48 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 		const task = event.payload;
 		const env = this.env;
 
-		if (task.type === 'message' || task.type === 'business_message' || task.type === 'tool_call' || task.type === 'photo') {
-			await step.do('process task', async () => {
-				await processTask(task, env);
-			});
-		} else if (task.type === 'code' && task.prompt === '/stream') {
-			const draftId = task.updateId || Date.now();
-			for (let i = 1; i <= 20; i++) {
-				await step.do(`step ${i}`, async () => {
-					const api = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN).api;
-					if (i === 20) {
-						await sendMessageDraft(api, {
-							chat_id: task.chatId,
-							text: i.toString(),
-							draft_id: draftId,
-							business_connection_id: task.businessConnectionId,
-							finish: true,
-						});
-						await api.sendMessage(task.chatId!, i.toString(), {
-							business_connection_id: task.businessConnectionId,
-						});
-					} else {
-						await sendMessageDraft(api, {
-							chat_id: task.chatId,
-							text: i.toString(),
-							draft_id: draftId,
-							business_connection_id: task.businessConnectionId,
-						});
+		if (
+			task.type === 'message' ||
+			task.type === 'business_message' ||
+			task.type === 'tool_call' ||
+			task.type === 'photo' ||
+			task.type === 'voice' ||
+			task.type === 'gen_photo' ||
+			task.type === 'code'
+		) {
+			if (task.type === 'code' && task.prompt === '/stream') {
+				const draftId = task.updateId || Date.now();
+				for (let i = 1; i <= 20; i++) {
+					await step.do(`step ${i}`, async () => {
+						const api = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN).api;
+						if (i === 20) {
+							await sendMessageDraft(api, {
+								chat_id: task.chatId,
+								text: i.toString(),
+								draft_id: draftId,
+								business_connection_id: task.businessConnectionId,
+								finish: true,
+							});
+							await api.sendMessage(task.chatId!, i.toString(), {
+								business_connection_id: task.businessConnectionId,
+							});
+						} else {
+							await sendMessageDraft(api, {
+								chat_id: task.chatId,
+								text: i.toString(),
+								draft_id: draftId,
+								business_connection_id: task.businessConnectionId,
+							});
+						}
+					});
+					if (i < 20) {
+						await step.sleep(`sleep ${i}`, '2 seconds');
 					}
-				});
-				if (i < 20) {
-					await step.sleep(`sleep ${i}`, '2 seconds');
 				}
+			} else {
+				await step.do('process task', async () => {
+					await processTask(task, env);
+				});
 			}
 		}
 	}
