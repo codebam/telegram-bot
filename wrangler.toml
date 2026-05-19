@@ -2,8 +2,6 @@ name = "tux-robot"
 main = "src/index.ts"
 compatibility_flags = [ "nodejs_compat" ]
 compatibility_date = "2025-06-04"
-usage_model = "standard"
-max_duration = 300
 
 [ai]
 binding = "AI"
