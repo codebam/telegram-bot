@@ -346,7 +346,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 						}
 						const isFileTask = !!ctx.message?.document || !!(replyToMessage && replyToMessage.document);
 						if (isFileTask) {
-							return 'You are a helpful assistant.';
+							return 'You are a helpful assistant running on Telegram. Ensure your responses are formatted using supported Telegram MarkdownV2.';
 						}
 						const customPrompt = await env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
 						return customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
