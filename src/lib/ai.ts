@@ -275,7 +275,7 @@ export async function customRunWithTools(
 					break;
 				}
 
-				if (chunkStr.includes('"content"') || chunkStr.includes('"text"') || chunkStr.includes('"response"') || chunkStr.includes('"parts"')) {
+				if (chunkStr.includes('"content"') || chunkStr.includes('"text"') || chunkStr.includes('"response"') || chunkStr.includes('"parts"') || chunkStr.includes('"reasoning_content"') || chunkStr.includes('"thought"')) {
 					return new ReadableStream({
 						start(controller) {
 							for (const c of chunks) controller.enqueue(c);
@@ -325,9 +325,36 @@ export async function customRunWithTools(
 					}
 				}
 				responseToProcess = combinedResponse;
+			} else if (chunks.length > 0) {
+				// We exhausted the stream but didn't find tool calls. Treat as static response.
+				const fullText = chunks.map(c => decoder.decode(c, { stream: true })).join('');
+				const lines = fullText.split('\n');
+				let combinedResponse: any = { choices: [{ message: { content: '' } }] };
+				for (const line of lines) {
+					const trimmed = line.trim();
+					if (trimmed.startsWith('data: ')) {
+						const data = trimmed.substring(6);
+						if (data === '[DONE]') break;
+						try {
+							const parsed = JSON.parse(data);
+							const delta = parsed.choices?.[0]?.delta;
+							if (delta?.content) combinedResponse.choices[0].message.content += delta.content;
+							if (delta?.reasoning_content) {
+								if (!combinedResponse.choices[0].message.reasoning_content) combinedResponse.choices[0].message.reasoning_content = '';
+								combinedResponse.choices[0].message.reasoning_content += delta.reasoning_content;
+							}
+						} catch { /* ignore */ }
+					}
+				}
+				responseToProcess = combinedResponse;
 			}
 		} else {
 			responseToProcess = response;
+		}
+
+		if (!responseToProcess) {
+			console.log('[customRunWithTools] No response to process, breaking loop.');
+			break;
 		}
 
 		const aiRes = responseToProcess as AiResponse;
