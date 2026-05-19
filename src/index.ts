@@ -131,11 +131,11 @@ async function chargeStars(
 	const balance = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
 
 	const modelPreference =
-		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'gemma4';
-	const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS.gemma4;
+		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'glm-4.7-flash';
+	const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['glm-4.7-flash'];
 
 	if (task.type === 'tool_call' && !modelConfig.supportsTools) {
-		task.modelId = AVAILABLE_MODELS.gemma4.id;
+		task.modelId = AVAILABLE_MODELS['glm-4.7-flash'].id;
 	} else if ((task.type === 'photo' || task.geminiParts?.some((p) => p.inlineData)) && !modelConfig.supportsVision) {
 		task.modelId = AVAILABLE_MODELS['google/gemini-3.1-flash-lite'].id;
 	} else {
@@ -278,11 +278,11 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 			const { balance, modelPreference } = await conversation.external(async () => {
 				const b = await getBalance(billingUserId || 0, env.CONVERSATION_HISTORY);
-				const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'gemma4';
+				const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'glm-4.7-flash';
 				return { balance: b, modelPreference: mp };
 			});
 
-			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS.gemma4;
+			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['glm-4.7-flash'];
 
 			if (ctx.message?.document) {
 				const doc = ctx.message.document;
@@ -549,7 +549,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 					await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
 				}
 			} else {
-				const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'gemma4';
+				const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'glm-4.7-flash';
 				await ctx.reply(
 					`Current model: <b>${currentModel}</b>\n\n` +
 						`Available models:\n` +
