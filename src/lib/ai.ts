@@ -46,7 +46,13 @@ export function createThinkFilter() {
 						current = current.slice(closeIdx + closeMatch[0].length);
 						inside = false;
 					} else {
-						buffer = current;
+						// Look for partial close tag
+						const lastLt = current.lastIndexOf('<');
+						if (lastLt !== -1 && lastLt > current.length - 10) {
+							result += ''; // Still inside
+							buffer = current.slice(lastLt);
+							return result;
+						}
 						return '';
 					}
 				} else {
@@ -72,7 +78,7 @@ export function createThinkFilter() {
 							}
 						}
 						result += flush(current);
-						return result;
+						current = '';
 					}
 				}
 			}
