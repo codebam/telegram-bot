@@ -185,13 +185,19 @@ export async function parseTelegramFile(
 
 			if (cleanEmbedData.length > 0) {
 				const fileHash = await getShortHash(file_id);
+
+				// Store chunk texts in KV instead of Vectorize metadata to prevent RPC size limit/hang issues
+				for (const item of cleanEmbedData) {
+					const chunkKey = `doc_chunk:${fileHash}_${item.index}`;
+					await env.CONVERSATION_HISTORY.put(chunkKey, item.chunk, { expirationTtl: 86400 * 7 });
+				}
+
 				const vectors = cleanEmbedData.map((item) => ({
 					id: `${fileHash}_${item.index}`,
 					values: item.vector,
 					metadata: {
 						file_id,
 						file_name,
-						text: item.chunk,
 						chunk_index: item.index
 					}
 				}));
@@ -320,13 +326,13 @@ export const createTelegramFileSearchTool = (
 					return `No relevant matches found in the document for query: "${query}"`;
 				}
 
-				const matches = searchRes.matches
-					.map((match, i) => {
-						const metadata = match.metadata as { text?: string; chunk_index?: number };
-						const text = metadata?.text || 'No text content';
-						return `[Match ${i + 1}] (Relevance: ${(match.score * 100).toFixed(1)}%)\n${text}`;
-					})
-					.join('\n\n');
+				const matchesPromises = searchRes.matches.map(async (match, i) => {
+					const chunkKey = `doc_chunk:${match.id}`;
+					const text = await env.CONVERSATION_HISTORY.get(chunkKey) || 'No text content';
+					return `[Match ${i + 1}] (Relevance: ${(match.score * 100).toFixed(1)}%)\n${text}`;
+				});
+
+				const matches = (await Promise.all(matchesPromises)).join('\n\n');
 
 				return `Search results for "${query}":\n\n${matches}`;
 			} catch (e) {
