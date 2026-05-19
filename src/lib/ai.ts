@@ -281,10 +281,11 @@ export async function customRunWithTools(
 			}));
 
 			const result = await ai.run(model, options);
-			console.log(`[customRunWithTools] ai.run returned. Type: ${typeof result}, Keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') : 'none'}`);
+			const isStream = result && typeof (result as any).getReader === 'function';
+			console.log(`[customRunWithTools] ai.run returned. Type: ${typeof result}, isStream: ${isStream}, Keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') : 'none'}`);
 			
-			if (stream && !(result instanceof ReadableStream)) {
-				if (result && typeof result === 'object' && 'body' in result && result.body instanceof ReadableStream) {
+			if (stream && !isStream) {
+				if (result && typeof result === 'object' && 'body' in result && result.body && typeof (result.body as any).getReader === 'function') {
 					return result.body;
 				}
 			}
@@ -301,7 +302,7 @@ export async function customRunWithTools(
 		const shouldStream = isFinalTurn ? config.streamFinalResponse : false;
 		const response = await runModel(messages, shouldStream, turn > 0);
 
-		if (shouldStream || response instanceof ReadableStream) {
+		if (shouldStream || (response && typeof (response as any).getReader === 'function')) {
 			return response as ReadableStream;
 		}
 
@@ -465,17 +466,22 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
 	const filter = createThinkFilter();
 
-	if (response instanceof ReadableStream) {
-		const reader = response.getReader();
+	if (response && typeof (response as any).getReader === 'function') {
+		const reader = (response as ReadableStream).getReader();
 		const decoder = new TextDecoder();
 		let buffer = '';
 		let chunkCount = 0;
 		try {
 			while (true) {
 				const { done, value } = await reader.read();
-				if (done) break;
+				if (done) {
+					console.log(`[runStream] Stream closed after ${chunkCount} chunks.`);
+					break;
+				}
 				chunkCount++;
-				buffer += decoder.decode(value, { stream: true });
+				const chunkStr = decoder.decode(value, { stream: true });
+				console.log(`[runStream] Received chunk ${chunkCount}. Length: ${chunkStr.length}`);
+				buffer += chunkStr;
 				const lines = buffer.split('\n');
 				buffer = lines.pop() || '';
 
@@ -507,7 +513,8 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 		const tail = filter.end();
 		if (tail) yield tail;
 	} else {
-		yield stripThinking(extractText(response));
+		console.log(`[runStream] Response is not a stream. Type: ${typeof response}`);
+		yield stripThinking(extractText(response as AiResponse));
 	}
 }
 
