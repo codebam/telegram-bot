@@ -257,6 +257,9 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 						}
 					});
 				}
+				if (!prompt) {
+					prompt = 'Please describe this image';
+				}
 			}
 
 			if (ctx.message?.document) {
