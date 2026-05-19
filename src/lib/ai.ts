@@ -515,7 +515,9 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							
 							// Check for reasoning signals in the raw JSON
 							const delta = (parsed.choices?.[0] as any)?.delta;
+							let isReasoning = false;
 							if (delta && (delta.reasoning_content || delta.thought)) {
+								isReasoning = true;
 								onStatusUpdate?.('Reasoning');
 							}
 
@@ -523,7 +525,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							if (chunkCount <= 10) {
 								const keys = Object.keys(parsed).join(', ');
 								const hasContent = !!text;
-								console.log(`[runStream] Chunk ${chunkCount} keys: ${keys}. hasText: ${hasContent}`);
+								console.log(`[runStream] Chunk ${chunkCount} keys: ${keys}. hasText: ${hasContent}, isReasoning: ${isReasoning}`);
 								if (!hasContent && chunkCount <= 3) {
 									console.log(`[runStream] Chunk ${chunkCount} raw: ${JSON.stringify(parsed)}`);
 								}
@@ -531,6 +533,9 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							if (text) {
 								const filtered = filter.push(text);
 								if (filtered) yield filtered;
+							} else if (isReasoning) {
+								// Yield empty string to unblock consumer and allow status updates
+								yield '';
 							}
 						} catch (e) {
 							console.log(`[runStream] Failed to parse JSON from line: "${trimmed.slice(0, 100)}..."`);
@@ -542,7 +547,9 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							
 							// Check for reasoning signals in the raw JSON
 							const delta = (parsed.choices?.[0] as any)?.delta;
+							let isReasoning = false;
 							if (delta && (delta.reasoning_content || delta.thought)) {
+								isReasoning = true;
 								onStatusUpdate?.('Reasoning');
 							}
 
@@ -550,11 +557,13 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							if (chunkCount <= 10) {
 								const keys = Object.keys(parsed).join(', ');
 								const hasContent = !!text;
-								console.log(`[runStream] Raw JSON chunk ${chunkCount} keys: ${keys}. hasText: ${hasContent}`);
+								console.log(`[runStream] Raw JSON chunk ${chunkCount} keys: ${keys}. hasText: ${hasContent}, isReasoning: ${isReasoning}`);
 							}
 							if (text) {
 								const filtered = filter.push(text);
 								if (filtered) yield filtered;
+							} else if (isReasoning) {
+								yield '';
 							}
 						} catch {
 							// Not JSON, ignore
