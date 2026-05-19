@@ -4,6 +4,7 @@ import { stream, type StreamFlavor } from '@grammyjs/stream';
 import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
+import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
 import { HistoryManager, getBalance, markdownToHtml, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
@@ -14,12 +15,12 @@ type BaseContext = CommandsFlavor &
 	Context & {
 		env: Environment;
 		executionCtx: ExecutionContext;
-		session: any;
+		session: Record<string, unknown>;
 	};
 
 type MyContext = StreamFlavor<BaseContext & ConversationFlavor<BaseContext>>;
 
-type MyConversation = Conversation<MyContext>;
+type MyConversation = Conversation<MyContext, MyContext>;
 
 async function getBusinessOwnerData(
 	ctx: Context,
@@ -348,12 +349,12 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 
 	bot.use(
 		session({
-			initial: () => ({}) as any,
-			storage: new KvAdapter(env.CONVERSATION_HISTORY as any),
+			initial: () => ({}),
+			storage: new KvAdapter(env.CONVERSATION_HISTORY as unknown as CfKVNamespace),
 		}),
 	);
 	bot.use(conversations());
-	bot.use(createConversation(createChatConversation(env, executionCtx) as any, 'chatConversation'));
+	bot.use(createConversation(createChatConversation(env, executionCtx), 'chatConversation'));
 
 	const commands = new CommandGroup<MyContext>();
 
@@ -618,13 +619,11 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			{ role: 'user', content: query },
 		];
 		try {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const rawResponse = await ctx.env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct' as any, {
+			const rawResponse = await ctx.env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
 				messages,
 				max_completion_tokens: 100,
 			});
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const aiResponse = rawResponse as any;
+			const aiResponse = rawResponse as { response?: string };
 			if (aiResponse.response) {
 				await ctx.answerInlineQuery([
 					{
@@ -758,8 +757,8 @@ export default {
 					{
 						env,
 						api: botInstance.api,
-						// eslint-disable-next-line @typescript-eslint/no-explicit-any
-						reply: (text: string, options: any) => botInstance.api.sendMessage(task.chatId!, text, options),
+						reply: (text: string, options: Parameters<typeof botInstance.api.sendMessage>[2]) =>
+							botInstance.api.sendMessage(task.chatId!, text, options),
 					},
 					env.AI,
 					modelId,
@@ -810,22 +809,22 @@ export default {
 				createSandboxTool(env.Sandbox, String(task.userId)),
 			];
 
-			const aiResponse = (await customRunWithTools(
+			const aiResponse = await customRunWithTools(
 				env.AI,
 				task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8',
 				{ messages, tools: task.type === 'tool_call' ? tools : [] },
 				{ streamFinalResponse: task.stream || false },
-			)) as any;
+			);
 
-			console.log(`[Fetch] aiResponse type: ${typeof aiResponse}, constructor: ${aiResponse?.constructor?.name}`);
+			console.log(`[Fetch] aiResponse type: ${typeof aiResponse}, constructor: ${aiResponse && typeof aiResponse === 'object' ? aiResponse.constructor?.name : 'unknown'}`);
 
-			let stream = null;
+			let stream: ReadableStream | null = null;
 			if (aiResponse instanceof ReadableStream) {
 				stream = aiResponse;
-			} else if (aiResponse && aiResponse.body instanceof ReadableStream) {
+			} else if (aiResponse && typeof aiResponse === 'object' && 'body' in aiResponse && aiResponse.body instanceof ReadableStream) {
 				stream = aiResponse.body;
-			} else if (aiResponse && typeof aiResponse.getReader === 'function') {
-				stream = aiResponse;
+			} else if (aiResponse && typeof aiResponse === 'object' && 'getReader' in aiResponse && typeof aiResponse.getReader === 'function') {
+				stream = aiResponse as unknown as ReadableStream;
 			}
 
 			if (task.stream && stream) {
@@ -889,9 +888,8 @@ export default {
 				});
 			}
 		}
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		return (webhookCallback(bot, 'cloudflare-mod', {
-		        onTimeout: 'return',
-		}) as any)(request, env, executionCtx);
+		return webhookCallback(bot, 'cloudflare-mod', {
+			onTimeout: 'return',
+		})(request);
 		},
 		};
