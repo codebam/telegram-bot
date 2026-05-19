@@ -730,9 +730,13 @@ export async function streamAiResponseToTelegram(
 				task.updateType !== 'business_message' &&
 				now - lastUpdate.time > 5000
 			) {
-				const text = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
+				let text = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
 					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''), true)
 					: (hasSeenReasoning ? '> Reasoning' : '> Thinking');
+
+				if (text.length > 4095) {
+					text = text.slice(0, 4090) + '...';
+				}
 
 				await sendMessageDraft(apiWithOptimism, {
 					chat_id: task.chatId,
@@ -751,14 +755,17 @@ export async function streamAiResponseToTelegram(
 	}
 	console.log(`[streamAiResponseToTelegram] Stream finished. ContentLength: ${streamContent.length}`);
 
-	const TEXT_LIMIT = 3800;
+	const TEXT_LIMIT = 3500;
 	if (streamContent.length > TEXT_LIMIT) {
 		console.log(`[streamAiResponseToTelegram] Limit Reached. ${streamContent.length} > ${TEXT_LIMIT}`);
 		streamContent = streamContent.slice(0, TEXT_LIMIT) + '\n\n[Truncated due to Telegram length limit]';
 	}
 
 	if (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim()) {
-		const finalMessage = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent);
+		let finalMessage = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent);
+		if (finalMessage.length > 4095) {
+			finalMessage = finalMessage.slice(0, 4090) + '...';
+		}
 		console.log(`[streamAiResponseToTelegram] Final Message Len: ${finalMessage.length} (Content: ${streamContent.length}, Think: ${thinkingContent.length}, Reason: ${reasoningContent.length})`);
 		if (task.updateType === 'guest_message') {
 			if (task.guestQueryId) {
@@ -767,7 +774,7 @@ export async function streamAiResponseToTelegram(
 					.answerGuestQuery(task.guestQueryId, {
 						type: 'article',
 						id: crypto.randomUUID(),
-						title: streamContent.slice(0, 64),
+						title: stripThinking(streamContent).slice(0, 64),
 						input_message_content: {
 							message_text: finalMessage,
 							parse_mode: 'MarkdownV2',
