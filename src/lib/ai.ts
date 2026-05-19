@@ -14,8 +14,6 @@ import {
 } from '@codebam/shared';
 
 const THINK_TAGS = ['think', 'thinking', 'reasoning', 'reflection', 'thought', 'analysis'];
-const THINK_OPEN_RE = new RegExp(`<(?:${THINK_TAGS.join('|')})(?:\\s[^>]*)?>`, 'i');
-const THINK_CLOSE_RE = new RegExp(`</(?:${THINK_TAGS.join('|')})>`, 'i');
 const THINK_BLOCK_RE = new RegExp(
 	`<(?:${THINK_TAGS.join('|')})(?:\\s[^>]*)?>[\\s\\S]*?</(?:${THINK_TAGS.join('|')})>`,
 	'gi'
@@ -40,8 +38,8 @@ export function stripThinking(text: string): string {
  * chunks.
  */
 export function createThinkFilter() {
-	let buffer = '';
 	let inside = false;
+	let buffer = '';
 	let emittedAny = false;
 	const flush = (chunk: string) => {
 		const out = emittedAny ? chunk : chunk.replace(/^\s+/, '');
@@ -50,45 +48,53 @@ export function createThinkFilter() {
 	};
 	return {
 		push(chunk: string): string {
-			buffer += chunk;
 			let result = '';
-			while (buffer.length > 0) {
+			let current = buffer + chunk;
+			buffer = '';
+
+			while (current.length > 0) {
 				if (inside) {
-					const close = buffer.match(THINK_CLOSE_RE);
-					if (!close || close.index === undefined) return result;
-					buffer = buffer.slice(close.index + close[0].length);
-					inside = false;
-				} else {
-					const open = buffer.match(THINK_OPEN_RE);
-					if (open && open.index !== undefined) {
-						if (open.index > 0) result += flush(buffer.slice(0, open.index));
-						buffer = buffer.slice(open.index + open[0].length);
-						inside = true;
-						continue;
+					const closeMatch = current.match(/<\/([a-z]+)>/i);
+					if (closeMatch && THINK_TAGS.includes(closeMatch[1].toLowerCase())) {
+						const closeIdx = closeMatch.index!;
+						current = current.slice(closeIdx + closeMatch[0].length);
+						inside = false;
+					} else {
+						return '';
 					}
-					const firstLt = buffer.indexOf('<');
-					if (firstLt === -1) {
-						result += flush(buffer);
-						buffer = '';
+				} else {
+					const openMatch = current.match(/<([a-z]+)(?:\s[^>]*)?>/i);
+					if (openMatch && THINK_TAGS.includes(openMatch[1].toLowerCase())) {
+						const openIdx = openMatch.index!;
+						result += flush(current.slice(0, openIdx));
+						current = current.slice(openIdx + openMatch[0].length);
+						inside = true;
+					} else {
+						const lastLt = current.lastIndexOf('<');
+						if (lastLt !== -1 && lastLt > current.length - 20) {
+							const partial = current.slice(lastLt);
+							const isPotential = THINK_TAGS.some(tag => {
+								const openTag = `<${tag}`;
+								const closeTag = `</${tag}`;
+								return openTag.startsWith(partial) || closeTag.startsWith(partial);
+							});
+							if (isPotential) {
+								result += flush(current.slice(0, lastLt));
+								buffer = partial;
+								return result;
+							}
+						}
+						result += flush(current);
 						return result;
 					}
-					if (firstLt > 0) {
-						result += flush(buffer.slice(0, firstLt));
-						buffer = buffer.slice(firstLt);
-					}
-					const gt = buffer.indexOf('>');
-					if (gt === -1) return result; // hold partial tag, wait for more
-					// Complete `<...>` that didn't match THINK_OPEN_RE — pass through.
-					result += flush(buffer.slice(0, gt + 1));
-					buffer = buffer.slice(gt + 1);
 				}
 			}
 			return result;
 		},
 		end(): string {
 			if (inside) {
-				buffer = '';
 				inside = false;
+				buffer = '';
 				return '';
 			}
 			const tail = buffer;
