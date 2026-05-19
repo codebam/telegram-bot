@@ -347,22 +347,24 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 					const modelId = modelConfig.id;
 
-					await conversation.external(() => ctx.env.STREAM_WORKFLOW.create({
-						params: {
-							type: ctx.update.business_message ? 'business_message' : 'message',
-							updateType: ctx.update.business_message ? 'business_message' : 'message',
-							prompt,
-							chatId: ctx.chat?.id.toString(),
-							threadId,
-							businessConnectionId: ctx.update.business_message?.business_connection_id?.toString(),
-							messageId: ctx.message?.message_id || ctx.update.business_message?.message_id,
-							userId: String(userId),
-							systemPrompt,
-							history,
-							telegramToken: env.SECRET_TELEGRAM_API_TOKEN,
-							modelId,
-						},
-					}));
+					await conversation.external(async () => {
+						await ctx.env.STREAM_WORKFLOW.create({
+							params: {
+								type: ctx.update.business_message ? 'business_message' : 'message',
+								updateType: ctx.update.business_message ? 'business_message' : 'message',
+								prompt,
+								chatId: ctx.chat?.id.toString(),
+								threadId,
+								businessConnectionId: ctx.update.business_message?.business_connection_id?.toString(),
+								messageId: ctx.message?.message_id || ctx.update.business_message?.message_id,
+								userId: String(userId),
+								systemPrompt,
+								history,
+								telegramToken: env.SECRET_TELEGRAM_API_TOKEN,
+								modelId,
+							},
+						});
+					});
 				} else {
 					// Handle insufficient balance (omitted full logic for brevity, can call ctx.replyWithInvoice)
 					await ctx.reply('Insufficient balance. Please top up your Stars.');
@@ -958,7 +960,6 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 	async run(event: WorkflowEvent<Task>, step: WorkflowStep) {
 		const task = event.payload;
-		const env = this.env;
 
 		if (
 			task.type === 'message' ||
@@ -973,7 +974,7 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 				const draftId = task.updateId || Date.now();
 				for (let i = 1; i <= 20; i++) {
 					await step.do(`step ${i}`, async () => {
-						const api = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN).api;
+						const api = new Bot<MyContext>(this.env.SECRET_TELEGRAM_API_TOKEN).api;
 						if (i === 20) {
 							await sendMessageDraft(api, {
 								chat_id: task.chatId,
@@ -1000,7 +1001,7 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 				}
 			} else {
 				await step.do('process task', async () => {
-					await processTask(task, env);
+					await processTask(task, this.env);
 				});
 			}
 		}
