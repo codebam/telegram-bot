@@ -136,6 +136,8 @@ async function chargeStars(
 
 	if (task.type === 'tool_call' && !modelConfig.supportsTools) {
 		task.modelId = AVAILABLE_MODELS.gemma4.id;
+	} else if ((task.type === 'photo' || task.geminiParts?.some((p) => p.inlineData)) && !modelConfig.supportsVision) {
+		task.modelId = AVAILABLE_MODELS['google/gemini-3.1-flash-lite'].id;
 	} else {
 		task.modelId = modelConfig.id;
 	}
@@ -302,6 +304,20 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 				});
 
 				const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS.gemma4;
+
+				if (geminiParts.some((p) => p.inlineData) && !modelConfig.supportsVision) {
+					await ctx.reply(
+						`⚠️ Your current model (<b>${modelPreference}</b>) does not support vision/images.\n\n` +
+							`Please switch to a vision-enabled model using:\n` +
+							`- <code>/model google/gemini-3.1-flash-lite</code> (10 Stars)\n` +
+							`- <code>/model llama-3.2-vision</code> (10 Stars)\n` +
+							`- <code>/model google/gemini-3.1-pro</code> (80 Stars)`,
+						{ parse_mode: 'HTML' }
+					);
+					ctx = await conversation.wait();
+					continue;
+				}
+
 				const amount = modelConfig.cost;
 
 				if (balance >= amount) {
