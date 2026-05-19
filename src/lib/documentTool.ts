@@ -162,18 +162,27 @@ export async function parseTelegramFile(
 			}
 
 			const chunks = chunkText(rawText, 1000, 200);
-			console.log(`[parseTelegramFile] Chunked document into ${chunks.length} chunks. Generating embeddings...`);
+			console.log(`[parseTelegramFile] Chunked document into ${chunks.length} chunks. Generating embeddings sequentially...`);
 
-			// Generate embeddings for all chunks via Workers AI
-			const embedRes = (await env.AI.run('@cf/baai/bge-large-en-v1.5', {
-				text: chunks
-			})) as { data: number[][] };
+			// Generate embeddings sequentially to avoid GPU memory limits on batch operations
+			const embedData: number[][] = [];
+			for (let i = 0; i < chunks.length; i++) {
+				console.log(`[parseTelegramFile] Generating embedding for chunk ${i + 1}/${chunks.length}...`);
+				const res = (await env.AI.run('@cf/baai/bge-large-en-v1.5', {
+					text: [chunks[i]]
+				})) as { data: number[][] };
+				if (res && res.data && res.data[0]) {
+					embedData.push(res.data[0]);
+				} else {
+					console.error(`[parseTelegramFile] Failed to generate embedding for chunk ${i}`);
+				}
+			}
 
-			if (embedRes && embedRes.data && embedRes.data.length > 0) {
+			if (embedData.length > 0) {
 				const fileHash = await getShortHash(file_id);
-				const vectors = chunks.map((chunk, idx) => ({
+				const vectors = chunks.slice(0, embedData.length).map((chunk, idx) => ({
 					id: `${fileHash}_${idx}`,
-					values: embedRes.data[idx],
+					values: embedData[idx],
 					metadata: {
 						file_id,
 						file_name,
