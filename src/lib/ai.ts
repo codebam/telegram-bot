@@ -645,6 +645,37 @@ async function formatTelegramMessage(content: string, thinking?: string, reasoni
 }
 
 /**
+ * Creates an "Optimistic" API wrapper that retries failing sendMessageDraft calls 
+ * with escaped text if the initial formatted call fails due to invalid syntax.
+ */
+function createOptimisticApi(raw: any): any {
+	return new Proxy(raw, {
+		get(target, prop, receiver) {
+			if (prop === 'sendMessageDraft') {
+				return async (data: any, signal?: AbortSignal) => {
+					try {
+						return await target.sendMessageDraft(data, signal);
+					} catch (e: any) {
+						// Catch Markdown/HTML parsing errors
+						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
+							console.warn(`[OptimisticApi] Parsing failed, retrying with escaped text. Error: ${e.description}`);
+							const escapedData = {
+								...data,
+								text: sanitizeMarkdownV2(data.text),
+								parse_mode: 'MarkdownV2', // Ensure we use MarkdownV2 for the escaped version
+							};
+							return await target.sendMessageDraft(escapedData, signal);
+						}
+						throw e;
+					}
+				};
+			}
+			return Reflect.get(target, prop, receiver);
+		},
+	});
+}
+
+/**
  * Stream AI response to Telegram, with periodic updates to avoid rate limits.
  */
 export async function streamAiResponseToTelegram(
@@ -659,8 +690,13 @@ export async function streamAiResponseToTelegram(
 
 	console.log(`[streamAiResponseToTelegram] Starting for task: ${task.type}, updateType: ${task.updateType}, model: ${modelId}`);
 
+	const optimisticRaw = createOptimisticApi(ctx.api.raw);
+	const apiWithOptimism = Object.setPrototypeOf({
+		raw: optimisticRaw,
+	}, ctx.api);
+
 	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
-		await sendMessageDraft(ctx.api, {
+		await sendMessageDraft(apiWithOptimism, {
 			chat_id: task.chatId,
 			text: '> Thinking',
 			parse_mode: 'MarkdownV2',
@@ -698,7 +734,7 @@ export async function streamAiResponseToTelegram(
 					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''), true)
 					: (hasSeenReasoning ? '> Reasoning' : '> Thinking');
 
-				await sendMessageDraft(ctx.api, {
+				await sendMessageDraft(apiWithOptimism, {
 					chat_id: task.chatId,
 					text,
 					parse_mode: 'MarkdownV2',
@@ -753,7 +789,7 @@ export async function streamAiResponseToTelegram(
 				.catch((e: unknown) => console.error('[streamAiResponseToTelegram] Business Message Error:', e));
 		} else {
 			console.log('[streamAiResponseToTelegram] final sendMessageDraft and sendMessage');
-			await sendMessageDraft(ctx.api, {
+			await sendMessageDraft(apiWithOptimism, {
 				chat_id: task.chatId,
 				text: finalMessage,
 				parse_mode: 'MarkdownV2',
