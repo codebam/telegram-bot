@@ -636,28 +636,42 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 
 	commands.command('stream', 'Stream incrementing numbers', async (ctx) => {
 		const draftId = Date.now();
-		for (let i = 1; i <= 20; i++) {
-			if (i === 20) {
-				await sendMessageDraft(ctx.api, {
-					chat_id: ctx.chat?.id,
-					text: i.toString(),
-					draft_id: draftId,
-					business_connection_id: ctx.update.business_message?.business_connection_id,
-					finish: true,
-				});
-				await ctx.reply(i.toString(), {
-					business_connection_id: ctx.update.business_message?.business_connection_id,
-				});
-			} else {
-				await sendMessageDraft(ctx.api, {
-					chat_id: ctx.chat?.id,
-					text: i.toString(),
-					draft_id: draftId,
-					business_connection_id: ctx.update.business_message?.business_connection_id,
-				});
-				await new Promise((resolve) => setTimeout(resolve, 2000));
-			}
-		}
+		const chatId = ctx.chat?.id;
+		const businessConnectionId = ctx.update.business_message?.business_connection_id;
+
+		if (!chatId) return;
+
+		ctx.executionCtx.waitUntil(
+			(async () => {
+				for (let i = 1; i <= 20; i++) {
+					try {
+						if (i === 20) {
+							await sendMessageDraft(ctx.api, {
+								chat_id: chatId,
+								text: i.toString(),
+								draft_id: draftId,
+								business_connection_id: businessConnectionId,
+								finish: true,
+							});
+							await ctx.api.sendMessage(chatId, i.toString(), {
+								business_connection_id: businessConnectionId,
+							});
+						} else {
+							await sendMessageDraft(ctx.api, {
+								chat_id: chatId,
+								text: i.toString(),
+								draft_id: draftId,
+								business_connection_id: businessConnectionId,
+							});
+							await new Promise((resolve) => setTimeout(resolve, 2000));
+						}
+					} catch (e) {
+						console.error(`[streamCommand] Error at step ${i}:`, e);
+						break;
+					}
+				}
+			})(),
+		);
 	});
 
 	bot.use(commands);
