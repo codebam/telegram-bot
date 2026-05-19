@@ -320,12 +320,15 @@ export async function customRunWithTools(
 				};
 			});
 
-			messages.push({
+			const assistantMessage: any = {
 				role: 'assistant',
-				content: responseText || undefined,
+				content: responseText || null,
 				tool_calls: normalizedToolCalls,
-				geminiParts: isGemini ? geminiParts : undefined,
-			});
+			};
+			if (isGemini) {
+				assistantMessage.geminiParts = geminiParts;
+			}
+			messages.push(assistantMessage);
 
 			for (const call of normalizedToolCalls) {
 				const toolName = call.function.name;
