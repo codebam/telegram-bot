@@ -411,12 +411,32 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionContext) {
 	bot.use(async (ctx, next) => {
+		const updateType = Object.keys(ctx.update).find(k => k !== 'update_id');
+		console.log(`[Grammy-Update] Received update: ${ctx.update.update_id}, Type: ${updateType}`);
 		ctx.env = env;
 		ctx.executionCtx = executionCtx;
-		await next();
+		try {
+			await next();
+			console.log(`[Grammy-Update] Finished handling update ${ctx.update.update_id}`);
+		} catch (e) {
+			console.error(`[Grammy-Update] Error handling update ${ctx.update.update_id}:`, e);
+			throw e;
+		}
 	});
 
 	bot.api.config.use(autoRetry());
+	bot.api.config.use(async (prev, method, payload, signal) => {
+		console.log(`[Grammy-API] Request: ${method}, Payload:`, JSON.stringify(payload));
+		try {
+			const res = await prev(method, payload, signal);
+			console.log(`[Grammy-API] Success: ${method}`);
+			return res;
+		} catch (e) {
+			console.error(`[Grammy-API] Error in ${method}:`, e);
+			throw e;
+		}
+	});
+
 	bot.use(stream());
 
 	bot.use(
