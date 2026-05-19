@@ -126,8 +126,7 @@ export function extractText(obj: ExtractInput): string {
 	if (typeof response.delta === 'object' && response.delta !== null) {
 		const delta = response.delta as any;
 		if (typeof delta.content === 'string') return delta.content;
-		if (typeof delta.reasoning_content === 'string') return delta.reasoning_content;
-		if (typeof delta.thought === 'string') return delta.thought;
+		// Skip reasoning_content and thought in the final extraction to prevent leaks
 		if (typeof delta.text === 'string') return delta.text;
 	}
 	if (typeof response.delta === 'string') return response.delta;
@@ -152,9 +151,9 @@ export function extractText(obj: ExtractInput): string {
 		return text;
 	}
 
-	// Any other string field as a fallback
+	// Any other string field as a fallback, but excluding known meta/thinking fields
 	for (const key of Object.keys(response)) {
-		if (['id', 'model', 'object', 'created', 'usage', 'index', 'finish_reason'].includes(key)) continue;
+		if (['id', 'model', 'object', 'created', 'usage', 'index', 'finish_reason', 'reasoning_content', 'thought'].includes(key)) continue;
 		if (typeof response[key] === 'string' && response[key]) return response[key] as string;
 	}
 
