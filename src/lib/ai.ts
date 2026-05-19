@@ -560,12 +560,13 @@ export interface StreamCtx {
 async function formatTelegramMessage(content: string, thinking?: string, reasoning?: string): Promise<string> {
 	let message = '';
 	if (thinking) {
-		const sanitizedThinking = sanitizeMarkdownV2(thinking);
-		message += `>**Thinking**\n${sanitizedThinking}\n\n`.split('\n').map(line => line.startsWith('\\>') ? line.substring(1) : line).map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
+		const trimmedThinking = thinking.trim().replace(/\n\n$/, '\n');
+		const sanitizedThinking = sanitizeMarkdownV2(trimmedThinking);
+		message += `>**Thinking**\n${sanitizedThinking}`.split('\n').map(line => line.startsWith('\\>') ? line.substring(1) : line).map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n\n';
 	}
 	if (reasoning) {
-		const sanitizedReasoning = sanitizeMarkdownV2(reasoning);
-		message += `>**Reasoning**\n${sanitizedReasoning}\n\n`.split('\n').map(line => line.startsWith('\\>') ? line.substring(1) : line).map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
+		const sanitizedReasoning = sanitizeMarkdownV2(reasoning.trim());
+		message += `*Reasoning*\n${sanitizedReasoning}\n\n`;
 	}
 	message += await markdownToMarkdownV2(content);
 	return message;
