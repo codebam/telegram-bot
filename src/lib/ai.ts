@@ -659,20 +659,6 @@ export async function streamAiResponseToTelegram(
 	let reasoningContent = '';
 	let hasSeenReasoning = false;
 
-	let messageId: number | undefined;
-	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message' && task.chatId) {
-		try {
-			const initMsg = await ctx.api.sendMessage(task.chatId, '>Thinking', {
-				parse_mode: 'MarkdownV2',
-				message_thread_id: task.threadId,
-				reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
-			});
-			messageId = initMsg.message_id;
-		} catch (e) {
-			console.log('[streamAiResponseToTelegram] Error sending initial message:', e);
-		}
-	}
-
 	const lastUpdate = { time: Date.now() };
 	try {
 		for await (const chunk of getAiStream(ai, modelId, messages, tools, (status) => {
@@ -695,12 +681,6 @@ export async function streamAiResponseToTelegram(
 					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''))
 					: (hasSeenReasoning ? '>Reasoning' : '>Thinking');
 
-				if (messageId && task.chatId) {
-					await ctx.api.editMessageText(task.chatId, messageId, text, {
-						parse_mode: 'MarkdownV2',
-					}).catch(e => console.log('Edit error:', e));
-				}
-
 				await sendMessageDraft(token, {
 					chat_id: task.chatId,
 					text,
@@ -715,68 +695,63 @@ export async function streamAiResponseToTelegram(
 	} catch (e) {
 		console.error('[streamAiResponseToTelegram] Error during AI streaming:', e);
 	}
-		console.log(`[streamAiResponseToTelegram] Stream finished. Content length: ${streamContent.length}`);
+	console.log(`[streamAiResponseToTelegram] Stream finished. Content length: ${streamContent.length}`);
 
-		const TEXT_LIMIT = 3800;
-		if (streamContent.length > TEXT_LIMIT) {
-			console.log(`[streamAiResponseToTelegram] Content length (${streamContent.length}) exceeds limit. Truncating...`);
-			streamContent = streamContent.slice(0, TEXT_LIMIT) + '\n\n[Truncated due to Telegram length limit]';
-		}
+	const TEXT_LIMIT = 3800;
+	if (streamContent.length > TEXT_LIMIT) {
+		console.log(`[streamAiResponseToTelegram] Content length (${streamContent.length}) exceeds limit. Truncating...`);
+		streamContent = streamContent.slice(0, TEXT_LIMIT) + '\n\n[Truncated due to Telegram length limit]';
+	}
 
-		if (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim()) {
-			const finalMessage = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent);
-			if (task.updateType === 'guest_message') {
-				if (task.guestQueryId) {
-					console.log('[streamAiResponseToTelegram] Answering guest_message via answerGuestQuery');
-					await ctx.api
-						.answerGuestQuery(task.guestQueryId, {
-							type: 'article',
-							id: crypto.randomUUID(),
-							title: streamContent.slice(0, 64),
-							input_message_content: {
-								message_text: finalMessage,
-								parse_mode: 'MarkdownV2',
-							},
-						})
-						.catch((e: unknown) => console.log('Error answering guest query:', e));
-				} else {
-					console.log('[streamAiResponseToTelegram] guest_message has no guestQueryId, cannot answer');
-				}
-			} else if (task.updateType === 'business_message') {
-				console.log('[streamAiResponseToTelegram] Sending final sendMessage for business_message');
+	if (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim()) {
+		const finalMessage = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent);
+		if (task.updateType === 'guest_message') {
+			if (task.guestQueryId) {
+				console.log('[streamAiResponseToTelegram] Answering guest_message via answerGuestQuery');
 				await ctx.api
-					.sendMessage(task.chatId!, finalMessage, {
-						parse_mode: 'MarkdownV2',
-						message_thread_id: task.threadId,
-						business_connection_id: task.businessConnectionId,
-						reply_to_message_id: task.messageId,
+					.answerGuestQuery(task.guestQueryId, {
+						type: 'article',
+						id: crypto.randomUUID(),
+						title: streamContent.slice(0, 64),
+						input_message_content: {
+							message_text: finalMessage,
+							parse_mode: 'MarkdownV2',
+						},
 					})
-					.catch((e: unknown) => console.log('Error sending final business message:', e));
+					.catch((e: unknown) => console.log('Error answering guest query:', e));
 			} else {
-				console.log('[streamAiResponseToTelegram] Sending final sendMessageDraft and edit/sendMessage');
-				await sendMessageDraft(token, {
-					chat_id: task.chatId,
-					text: finalMessage,
+				console.log('[streamAiResponseToTelegram] guest_message has no guestQueryId, cannot answer');
+			}
+		} else if (task.updateType === 'business_message') {
+			console.log('[streamAiResponseToTelegram] Sending final sendMessage for business_message');
+			await ctx.api
+				.sendMessage(task.chatId!, finalMessage, {
 					parse_mode: 'MarkdownV2',
 					message_thread_id: task.threadId,
 					business_connection_id: task.businessConnectionId,
-					draft_id: draftId,
-					finish: true,
-				});
-				if (messageId && task.chatId) {
-					await ctx.api.editMessageText(task.chatId, messageId, finalMessage, {
-						parse_mode: 'MarkdownV2',
-					}).catch((e: unknown) => console.log('Error editing final message:', e));
-				} else if (task.chatId) {
-					await ctx.api.sendMessage(task.chatId, finalMessage, {
-						parse_mode: 'MarkdownV2',
-						message_thread_id: task.threadId,
-						business_connection_id: task.businessConnectionId,
-						reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
-					}).catch((e: unknown) => console.log('Error sending final message:', e));
-				}
+					reply_to_message_id: task.messageId,
+				})
+				.catch((e: unknown) => console.log('Error sending final business message:', e));
+		} else {
+			console.log('[streamAiResponseToTelegram] Sending final sendMessageDraft and sendMessage');
+			await sendMessageDraft(token, {
+				chat_id: task.chatId,
+				text: finalMessage,
+				parse_mode: 'MarkdownV2',
+				message_thread_id: task.threadId,
+				business_connection_id: task.businessConnectionId,
+				draft_id: draftId,
+				finish: true,
+			});
+			if (task.chatId) {
+				await ctx.api.sendMessage(task.chatId, finalMessage, {
+					parse_mode: 'MarkdownV2',
+					message_thread_id: task.threadId,
+					business_connection_id: task.businessConnectionId,
+					reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+				}).catch((e: unknown) => console.log('Error sending final message:', e));
 			}
 		}
+	}
 
-	return streamContent;
-}
+	return streamContent;}
