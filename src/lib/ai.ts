@@ -407,14 +407,21 @@ export async function customRunWithTools(
 }
 
 export async function sendMessageDraft(token: string, data: Record<string, unknown>) {
+	const textLen = typeof data.text === 'string' ? data.text.length : 0;
 	try {
-		await fetch(`https://api.telegram.org/bot${token}/sendMessageDraft`, {
+		const response = await fetch(`https://api.telegram.org/bot${token}/sendMessageDraft`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(data),
 		});
+		if (!response.ok) {
+			const errorText = await response.text();
+			console.error(`[sendMessageDraft] Failed. Status: ${response.status}, Len: ${textLen}, Error: ${errorText}`);
+		} else {
+			console.log(`[sendMessageDraft] Success. Len: ${textLen}, Status: ${response.status}`);
+		}
 	} catch (e) {
-		console.log('Error sending draft update:', e);
+		console.error(`[sendMessageDraft] Exception. Len: ${textLen}, Error:`, e);
 	}
 }
 
@@ -448,7 +455,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 			while (!streamFinished) {
 				const { done, value } = await reader.read();
 				if (done) {
-					console.log(`[runStream] Stream closed after ${chunkCount} chunks.`);
+					console.log(`[runStream] Stream Done. Chunks:${chunkCount}`);
 					break;
 				}
 				chunkCount++;
@@ -463,6 +470,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 					if (trimmed.startsWith('data: ')) {
 						const data = trimmed.substring(6);
 						if (data === '[DONE]') {
+							console.log('[runStream] [DONE] signal received');
 							streamFinished = true;
 							break;
 						}
@@ -483,9 +491,12 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 
 							const text = extractText(parsed);
 							const keys = Object.keys(parsed).join(',');
-							const hasContent = !!text;
-							const finishReason = parsed.choices?.[0]?.finish_reason || parsed.candidates?.[0]?.finish_reason || '';
-							console.log(`[runStream] C:${chunkCount} L:${text.length} FR:${finishReason} K:${keys} hasT:${hasContent} hasR:${!!reasoning}`);
+							const choice = parsed.choices?.[0];
+							const finishReason = choice?.finish_reason || parsed.candidates?.[0]?.finish_reason || '';
+							
+							if (chunkCount % 20 === 0 || finishReason) {
+								console.log(`[runStream] C:${chunkCount} L:${text.length} FR:${finishReason} K:${keys} hasT:${!!text} hasR:${!!reasoning}`);
+							}
 
 							if (text) {
 								const filtered = filter.push(text);
@@ -494,7 +505,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 								yield { type: 'content', text: '' };
 							}
 						} catch (e) {
-							console.log(`[runStream] ERR:${chunkCount} line:"${trimmed.slice(0, 50)}..."`);
+							console.log(`[runStream] JSON ERR:${chunkCount} line:"${trimmed.slice(0, 40)}..."`);
 						}
 					} else {
 						try {
@@ -512,7 +523,9 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							}
 
 							const text = extractText(parsed);
-							console.log(`[runStream] NC-C:${chunkCount} L:${text.length} K:${Object.keys(parsed).join(',')} hasT:${!!text} hasR:${!!reasoning}`);
+							if (chunkCount % 20 === 0) {
+								console.log(`[runStream] NC-C:${chunkCount} L:${text.length} hasT:${!!text}`);
+							}
 							if (text) {
 								const filtered = filter.push(text);
 								if (filtered) yield { type: 'content', text: filtered };
@@ -639,7 +652,7 @@ export async function streamAiResponseToTelegram(
 					business_connection_id: task.businessConnectionId,
 					draft_id: draftId,
 				});
-				console.log(`[streamAiResponseToTelegram] Draft Sent. L:${streamContent.length} T:${thinkingContent.length} R:${reasoningContent.length}`);
+				console.log(`[streamAiResponseToTelegram] Draft Task. StreamL:${streamContent.length} ThinkL:${thinkingContent.length} ReasonL:${reasoningContent.length} TotalL:${text.length}`);
 				lastUpdate.time = now;
 			}
 		}
@@ -656,7 +669,7 @@ export async function streamAiResponseToTelegram(
 
 	if (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim()) {
 		const finalMessage = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent);
-		console.log(`[streamAiResponseToTelegram] Final Message Len: ${finalMessage.length}`);
+		console.log(`[streamAiResponseToTelegram] Final Message Len: ${finalMessage.length} (Content: ${streamContent.length}, Think: ${thinkingContent.length}, Reason: ${reasoningContent.length})`);
 		if (task.updateType === 'guest_message') {
 			if (task.guestQueryId) {
 				console.log('[streamAiResponseToTelegram] answerGuestQuery');
@@ -670,9 +683,9 @@ export async function streamAiResponseToTelegram(
 							parse_mode: 'MarkdownV2',
 						},
 					})
-					.catch((e: unknown) => console.log('Guest Error:', e));
+					.catch((e: unknown) => console.error('[streamAiResponseToTelegram] Guest Error:', e));
 			} else {
-				console.log('[streamAiResponseToTelegram] no guestQueryId');
+				console.warn('[streamAiResponseToTelegram] no guestQueryId for guest_message');
 			}
 		} else if (task.updateType === 'business_message') {
 			console.log('[streamAiResponseToTelegram] sendMessage (business)');
@@ -683,7 +696,7 @@ export async function streamAiResponseToTelegram(
 					business_connection_id: task.businessConnectionId,
 					reply_to_message_id: task.messageId,
 				})
-				.catch((e: unknown) => console.log('Business Message Error:', e));
+				.catch((e: unknown) => console.error('[streamAiResponseToTelegram] Business Message Error:', e));
 		} else {
 			console.log('[streamAiResponseToTelegram] final sendMessageDraft and sendMessage');
 			await sendMessageDraft(token, {
@@ -701,9 +714,11 @@ export async function streamAiResponseToTelegram(
 					message_thread_id: task.threadId,
 					business_connection_id: task.businessConnectionId,
 					reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
-				}).catch((e: unknown) => console.log('Final Message Error:', e));
+				}).catch((e: unknown) => console.error('[streamAiResponseToTelegram] Final Message Error:', e));
 			}
 		}
+	} else {
+		console.warn('[streamAiResponseToTelegram] No content to send.');
 	}
 
 	return streamContent;}
