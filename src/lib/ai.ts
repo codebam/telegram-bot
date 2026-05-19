@@ -193,6 +193,7 @@ export async function customRunWithTools(
 						return { role, parts };
 					}),
 					tools: (!omitTools && cfTools.length > 0) ? [{ functionDeclarations: cfTools }] : undefined,
+					generationConfig: { maxOutputTokens: 8192 },
 					stream,
 				};
 				if (systemMessage?.content) {
@@ -218,6 +219,7 @@ export async function customRunWithTools(
 				}),
 				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
 				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
+				max_completion_tokens: 8192,
 				stream,
 			};
 
@@ -529,46 +531,11 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 }
 
 /**
- * Get AI stream for a model with automatic Gemini fallback.
+ * Get AI stream for a model.
  */
 export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = [], onStatusUpdate?: (status: 'Thinking' | 'Reasoning') => void): AsyncGenerator<StreamChunk, void, unknown> {
-	const fallbackModel = 'google/gemini-3.1-flash-lite';
-	if (model === fallbackModel) {
-		yield* runStream(ai, model, messages, tools, onStatusUpdate);
-		return;
-	}
-
-	try {
-		console.log(`[getAiStream] Attempting primary model: ${model}`);
-		const iterator = runStream(ai, model, messages, tools, onStatusUpdate)[Symbol.asyncIterator]();
-
-		const timeoutPromise = new Promise<never>((_, reject) =>
-			setTimeout(() => reject(new Error('TTFT_TIMEOUT')), 10000)
-		);
-
-		const firstResult = await Promise.race([
-			iterator.next(),
-			timeoutPromise
-		]);
-
-		if (firstResult.done) {
-			return;
-		}
-
-		yield firstResult.value;
-
-		while (true) {
-			const res = await iterator.next();
-			if (res.done) {
-				break;
-			}
-			yield res.value;
-		}
-	} catch (err) {
-		console.error(`[getAiStream] Primary model ${model} timed out or failed. Error:`, err);
-		console.log(`[getAiStream] Triggering silent fallback to ${fallbackModel}...`);
-		yield* runStream(ai, fallbackModel, messages, tools);
-	}
+	console.log(`[getAiStream] Running model: ${model}`);
+	yield* runStream(ai, model, messages, tools, onStatusUpdate);
 }
 
 export interface StreamCtx {
