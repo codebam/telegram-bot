@@ -269,8 +269,7 @@ export async function customRunWithTools(
 	let turn = 0;
 	while (turn < 5) {
 		const shouldStream = turn === 4 || cfTools.length === 0 ? config.streamFinalResponse : false;
-		const omitTools = isGemini ? false : (turn > 0);
-		const response = await runModel(messages, shouldStream, omitTools);
+		const response = await runModel(messages, shouldStream);
 
 		if (shouldStream || response instanceof ReadableStream) {
 			return response as ReadableStream;
@@ -323,8 +322,8 @@ export async function customRunWithTools(
 
 			const assistantMessage: any = {
 				role: 'assistant',
-				content: responseText || (isGemini ? null : `[Calling tool: ${normalizedToolCalls.map(c => `${c.function.name}(${c.function.arguments})`).join(', ')}]`),
-				tool_calls: isGemini ? normalizedToolCalls : undefined,
+				content: responseText || null,
+				tool_calls: normalizedToolCalls,
 			};
 			if (isGemini) {
 				assistantMessage.geminiParts = geminiParts;
@@ -348,9 +347,7 @@ export async function customRunWithTools(
 						const result = await tool.function(parsedArgs);
 						const content = typeof result === 'string' ? result : JSON.stringify(result);
 
-						const toolMessage: ChatMessage = isGemini
-							? { role: 'tool', tool_call_id: toolId, name: toolName, content }
-							: { role: 'user', content: `[Tool Output for ${toolName}]:\n${content}` };
+						const toolMessage: ChatMessage = { role: 'tool', tool_call_id: toolId, name: toolName, content };
 						if (isGemini) {
 							toolMessage.geminiParts = [
 								{
@@ -365,9 +362,7 @@ export async function customRunWithTools(
 					} catch (e) {
 						console.error(`[customRunWithTools] Tool execution failed: ${toolName}`, e);
 						const content = `Error: ${String(e)}`;
-						const toolMessage: ChatMessage = isGemini
-							? { role: 'tool', tool_call_id: toolId, name: toolName, content }
-							: { role: 'user', content: `[Tool Error for ${toolName}]:\n${content}` };
+						const toolMessage: ChatMessage = { role: 'tool', tool_call_id: toolId, name: toolName, content };
 						if (isGemini) {
 							toolMessage.geminiParts = [
 								{
@@ -382,9 +377,7 @@ export async function customRunWithTools(
 					}
 				} else {
 					const content = 'Tool not found';
-					const toolMessage: ChatMessage = isGemini
-						? { role: 'tool', tool_call_id: toolId, name: toolName, content }
-						: { role: 'user', content: `[Tool Error for ${toolName}]:\n${content}` };
+					const toolMessage: ChatMessage = { role: 'tool', tool_call_id: toolId, name: toolName, content };
 					if (isGemini) {
 						toolMessage.geminiParts = [
 							{
