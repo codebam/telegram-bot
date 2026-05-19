@@ -232,7 +232,7 @@ export async function customRunWithTools(
 			}));
 
 			const result = await ai.run(model, options);
-			const isStream = result && typeof (result as any).getReader === 'function';
+			const isStream = result && (typeof (result as any).getReader === 'function' || (typeof (result as any).body?.getReader === 'function'));
 			console.log(`[customRunWithTools] ai.run returned. Type: ${typeof result}, isStream: ${isStream}, Keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') : 'none'}`);
 			
 			if (stream && !isStream) {
@@ -424,6 +424,11 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
 	const filter = createThinkFilter();
+
+	if (response && (response as any).role === 'tool') {
+		console.log('[runStream] customRunWithTools returned a tool response unexpectedly');
+		return;
+	}
 
 	if (response && typeof (response as any).getReader === 'function') {
 		const reader = (response as ReadableStream).getReader();
