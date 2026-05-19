@@ -477,7 +477,7 @@ export async function sendMessageDraft(token: string, data: Record<string, unkno
 /**
  * Get AI stream for a model.
  */
-async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = []): AsyncGenerator<string, void, unknown> {
+async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = [], onStatusUpdate?: (status: 'Thinking' | 'Reasoning') => void): AsyncGenerator<string, void, unknown> {
 	console.log(`[runStream] Starting stream for model: ${model}`);
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
 	const filter = createThinkFilter();
@@ -496,7 +496,6 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 				}
 				chunkCount++;
 				const chunkStr = decoder.decode(value, { stream: true });
-				console.log(`[runStream] Received chunk ${chunkCount}. Length: ${chunkStr.length}`);
 				buffer += chunkStr;
 				const lines = buffer.split('\n');
 				buffer = lines.pop() || '';
@@ -509,11 +508,21 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 						if (data === '[DONE]') break;
 						try {
 							const parsed = JSON.parse(data);
+							
+							// Check for reasoning signals in the raw JSON
+							const delta = (parsed.choices?.[0] as any)?.delta;
+							if (delta && (delta.reasoning_content || delta.thought)) {
+								onStatusUpdate?.('Reasoning');
+							}
+
 							const text = extractText(parsed);
-							if (chunkCount <= 3) {
-								console.log(`[runStream] Chunk ${chunkCount} raw: ${JSON.stringify(parsed)}`);
-							} else if (chunkCount <= 10) {
-								console.log(`[runStream] Chunk ${chunkCount} keys: ${Object.keys(parsed).join(', ')}. Text preview: "${text.slice(0, 50)}..."`);
+							if (chunkCount <= 10) {
+								const keys = Object.keys(parsed).join(', ');
+								const hasContent = !!text;
+								console.log(`[runStream] Chunk ${chunkCount} keys: ${keys}. hasText: ${hasContent}`);
+								if (!hasContent && chunkCount <= 3) {
+									console.log(`[runStream] Chunk ${chunkCount} raw: ${JSON.stringify(parsed)}`);
+								}
 							}
 							if (text) {
 								const filtered = filter.push(text);
@@ -526,11 +535,18 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 						// Attempt to parse line as raw JSON if it doesn't have 'data: ' prefix
 						try {
 							const parsed = JSON.parse(trimmed);
+							
+							// Check for reasoning signals in the raw JSON
+							const delta = (parsed.choices?.[0] as any)?.delta;
+							if (delta && (delta.reasoning_content || delta.thought)) {
+								onStatusUpdate?.('Reasoning');
+							}
+
 							const text = extractText(parsed);
-							if (chunkCount <= 3) {
-								console.log(`[runStream] Raw JSON chunk ${chunkCount} raw: ${JSON.stringify(parsed)}`);
-							} else if (chunkCount <= 10) {
-								console.log(`[runStream] Raw JSON chunk ${chunkCount} keys: ${Object.keys(parsed).join(', ')}. Text preview: "${text.slice(0, 50)}..."`);
+							if (chunkCount <= 10) {
+								const keys = Object.keys(parsed).join(', ');
+								const hasContent = !!text;
+								console.log(`[runStream] Raw JSON chunk ${chunkCount} keys: ${keys}. hasText: ${hasContent}`);
 							}
 							if (text) {
 								const filtered = filter.push(text);
@@ -560,16 +576,16 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 /**
  * Get AI stream for a model with automatic Gemini fallback.
  */
-export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = []): AsyncGenerator<string, void, unknown> {
+export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = [], onStatusUpdate?: (status: 'Thinking' | 'Reasoning') => void): AsyncGenerator<string, void, unknown> {
 	const fallbackModel = 'google/gemini-3.1-flash-lite';
 	if (model === fallbackModel) {
-		yield* runStream(ai, model, messages, tools);
+		yield* runStream(ai, model, messages, tools, onStatusUpdate);
 		return;
 	}
 
 	try {
 		console.log(`[getAiStream] Attempting primary model: ${model}`);
-		const iterator = runStream(ai, model, messages, tools)[Symbol.asyncIterator]();
+		const iterator = runStream(ai, model, messages, tools, onStatusUpdate)[Symbol.asyncIterator]();
 
 		// Set to 10 seconds to allow time for tool execution and multi-turn inference
 		const timeoutPromise = new Promise<never>((_, reject) =>
@@ -624,15 +640,24 @@ export async function streamAiResponseToTelegram(
 	console.log(`[streamAiResponseToTelegram] Starting for task: ${task.type}, updateType: ${task.updateType}, model: ${modelId}`);
 
 	if (task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
-		// I specifically don't want a placeholder message like "Thinking..."
+		await sendMessageDraft(token, {
+			chat_id: task.chatId,
+			text: 'Thinking...',
+			parse_mode: 'HTML',
+			message_thread_id: task.threadId,
+			business_connection_id: task.businessConnectionId,
+			draft_id: draftId,
+		});
 	}
 
 	let streamContent = '';
+	let hasSeenReasoning = false;
 
 	if (ctx.replyWithStream && task.updateType !== 'guest_message' && task.updateType !== 'business_message') {
 		console.log('[streamAiResponseToTelegram] Using ctx.replyWithStream');
-		// Use the grammy stream plugin if available on context
-		const iterator = getAiStream(ai, modelId, messages, tools);
+		const iterator = getAiStream(ai, modelId, messages, tools, (status) => {
+			if (status === 'Reasoning') hasSeenReasoning = true;
+		});
 		let lastDraftUpdate = Date.now();
 
 		async function* streamWithMetadata(): AsyncIterable<MessageDraftPiece> {
@@ -640,16 +665,21 @@ export async function streamAiResponseToTelegram(
 				streamContent += chunk;
 				yield chunk as MessageDraftPiece;
 
-				if (Date.now() - lastDraftUpdate > 2000) {
+				const now = Date.now();
+				if (now - lastDraftUpdate > 2000) {
+					const text = streamContent 
+						? await markdownToHtml(streamContent + '...') 
+						: (hasSeenReasoning ? 'Reasoning...' : 'Thinking...');
+						
 					await sendMessageDraft(token, {
 						chat_id: task.chatId,
-						text: await markdownToHtml(streamContent + '...'),
+						text,
 						parse_mode: 'HTML',
 						message_thread_id: task.threadId,
 						business_connection_id: task.businessConnectionId,
 						draft_id: draftId,
 					});
-					lastDraftUpdate = Date.now();
+					lastDraftUpdate = now;
 				}
 			}
 		}
