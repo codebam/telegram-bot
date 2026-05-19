@@ -290,13 +290,13 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 			if (prompt) {
 				if (geminiParts.some((p) => p.inlineData) && !modelConfig.supportsVision) {
 					await ctx.reply(
-						`⚠️ Your current model (*${sanitizeMarkdownV2(modelPreference)}*) does not support vision/images.\n\n` +
-							`Please switch to a vision-enabled model using:\n` +
-							`- \`/model kimi-k2.6\` (40 Stars)\n` +
-							`- \`/model gemma4\` (10 Stars)\n` +
-							`- \`/model google/gemini-3.1-flash-lite\` (10 Stars)\n` +
-							`- \`/model llama-3.2-vision\` (10 Stars)\n` +
-							`- \`/model google/gemini-3.1-pro\` (80 Stars)`,
+						`⚠️ Your current model (*${sanitizeMarkdownV2(modelPreference)}*) does not support vision/images\\.\n\n` +
+							`Please switch to a vision\\-enabled model using:\n` +
+							`\\- \`/model kimi-k2.6\` \\(40 Stars\\)\n` +
+							`\\- \`/model gemma4\` \\(10 Stars\\)\n` +
+							`\\- \`/model google/gemini-3.1-flash-lite\` \\(10 Stars\\)\n` +
+							`\\- \`/model llama-3.2-vision\` \\(10 Stars\\)\n` +
+							`\\- \`/model google/gemini-3.1-pro\` \\(80 Stars\\)`,
 						{ parse_mode: 'MarkdownV2' }
 					);
 					ctx = await conversation.wait();
@@ -495,9 +495,9 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		if (selectedModel) {
 			if (selectedModel in AVAILABLE_MODELS) {
 				await ctx.env.CONVERSATION_HISTORY.put(modelKey, selectedModel);
-				await ctx.reply(`Model updated to *${sanitizeMarkdownV2(selectedModel)}*.`, { parse_mode: 'MarkdownV2' });
+				await ctx.reply(`Model updated to *${sanitizeMarkdownV2(selectedModel)}*\\.`, { parse_mode: 'MarkdownV2' });
 			} else {
-				await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
+				await ctx.reply(`Invalid model\\. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
 			}
 		} else {
 			const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'glm-4.7-flash';
@@ -505,7 +505,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 				`Current model: *${sanitizeMarkdownV2(currentModel)}*\n\n` +
 					`Available models:\n` +
 					Object.entries(AVAILABLE_MODELS)
-						.map(([name, cfg]) => `- \`${sanitizeMarkdownV2(name)}\` (${String(cfg.cost)} Stars)`)
+						.map(([name, cfg]) => `\\- \`${name.replace(/[`\\]/g, '\\$&')}\` \\(${String(cfg.cost)} Stars\\)`)
 						.join('\n'),
 				{ parse_mode: 'MarkdownV2' },
 			);
