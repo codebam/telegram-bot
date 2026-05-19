@@ -121,11 +121,18 @@ export function extractText(obj: ExtractInput): string {
 	if (typeof response.response === 'string') return response.response;
 	if (typeof response.text === 'string') return response.text;
 	if (typeof response.content === 'string') return response.content;
-	if (typeof response.delta === 'object' && response.delta !== null && typeof (response.delta as any).content === 'string') {
-		return (response.delta as any).content;
+	
+	// Handle delta objects (OpenAI-style streaming)
+	if (typeof response.delta === 'object' && response.delta !== null) {
+		const delta = response.delta as any;
+		if (typeof delta.content === 'string') return delta.content;
+		if (typeof delta.reasoning_content === 'string') return delta.reasoning_content;
+		if (typeof delta.thought === 'string') return delta.thought;
+		if (typeof delta.text === 'string') return delta.text;
 	}
 	if (typeof response.delta === 'string') return response.delta;
 
+	// Recursively search in common nested fields
 	if (Array.isArray(response.choices) && response.choices.length > 0)
 		return extractText(response.choices[0] as ExtractInput);
 	if (response.message) return extractText(response.message as ExtractInput);
@@ -134,6 +141,8 @@ export function extractText(obj: ExtractInput): string {
 	if (Array.isArray(response.candidates) && response.candidates.length > 0)
 		return extractText(response.candidates[0] as ExtractInput);
 	if (response.content) return extractText(response.content as ExtractInput);
+	
+	// Gemini parts
 	if (Array.isArray(response.parts) && response.parts.length > 0) {
 		let text = '';
 		for (const part of response.parts as GeminiPart[]) {
@@ -141,6 +150,12 @@ export function extractText(obj: ExtractInput): string {
 			if (part.text) text += part.text;
 		}
 		return text;
+	}
+
+	// Any other string field as a fallback
+	for (const key of Object.keys(response)) {
+		if (['id', 'model', 'object', 'created', 'usage', 'index', 'finish_reason'].includes(key)) continue;
+		if (typeof response[key] === 'string' && response[key]) return response[key] as string;
 	}
 
 	return '';
@@ -496,7 +511,9 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 						try {
 							const parsed = JSON.parse(data);
 							const text = extractText(parsed);
-							if (chunkCount <= 5) {
+							if (chunkCount <= 3) {
+								console.log(`[runStream] Chunk ${chunkCount} raw: ${JSON.stringify(parsed)}`);
+							} else if (chunkCount <= 10) {
 								console.log(`[runStream] Chunk ${chunkCount} keys: ${Object.keys(parsed).join(', ')}. Text preview: "${text.slice(0, 50)}..."`);
 							}
 							if (text) {
@@ -511,7 +528,9 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 						try {
 							const parsed = JSON.parse(trimmed);
 							const text = extractText(parsed);
-							if (chunkCount <= 5) {
+							if (chunkCount <= 3) {
+								console.log(`[runStream] Raw JSON chunk ${chunkCount} raw: ${JSON.stringify(parsed)}`);
+							} else if (chunkCount <= 10) {
 								console.log(`[runStream] Raw JSON chunk ${chunkCount} keys: ${Object.keys(parsed).join(', ')}. Text preview: "${text.slice(0, 50)}..."`);
 							}
 							if (text) {
