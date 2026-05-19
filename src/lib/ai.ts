@@ -479,7 +479,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 		let pendingReasoning = '';
 		let lastYieldTime = Date.now();
 
-		const flushPending = async function* () {
+		const flushPending = async function* (): AsyncGenerator<StreamChunk, void, unknown> {
 			if (pendingThinking) {
 				yield { type: 'thinking', text: pendingThinking };
 				pendingThinking = '';
@@ -614,20 +614,6 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 		const tail = filter.end();
 		if (tail) yield { type: 'content', text: tail };
 		console.log(`[runStream] Finished. TotalChunks:${chunkCount} BufferLength:${buffer.length} Duration:${Date.now() - startTime}ms`);
-	} else {
-		console.log(`[runStream] Response is not a stream. Type: ${typeof response}`);
-		const fullText = extractText(response as AiResponse, true);
-		const thinking = extractThinking(response as AiResponse);
-		const reasoning = extractReasoning(response as AiResponse);
-		const content = stripThinking(fullText);
-		if (thinking) yield { type: 'thinking', text: thinking };
-		if (reasoning) yield { type: 'reasoning', text: reasoning };
-		yield { type: 'content', text: content };
-	}
-}
-		const tail = filter.end();
-		if (tail) yield { type: 'content', text: tail };
-		console.log(`[runStream] Finished. TotalChunks:${chunkCount} BufferLength:${buffer.length}`);
 	} else {
 		console.log(`[runStream] Response is not a stream. Type: ${typeof response}`);
 		const fullText = extractText(response as AiResponse, true);
