@@ -3,6 +3,11 @@ import type { MessageDraftPiece, StreamContextExtension } from '@grammyjs/stream
 import {
 	markdownToMarkdownV2,
 	AVAILABLE_MODELS,
+	extractText,
+	extractThinking,
+	extractReasoning,
+	stripThinking,
+	THINK_TAGS,
 	type AiResponse,
 	type ChatMessage,
 	type GeminiPart,
@@ -11,25 +16,6 @@ import {
 	type Task,
 	type Tool,
 } from '@codebam/shared';
-
-const THINK_TAGS = ['think', 'thinking', 'reasoning', 'reflection', 'thought', 'analysis'];
-const THINK_BLOCK_RE = new RegExp(
-	`<(?:${THINK_TAGS.join('|')})(?:\\s[^>]*)?>[\\s\\S]*?</(?:${THINK_TAGS.join('|')})>`,
-	'gi'
-);
-const THINK_OPEN_ONLY_RE = new RegExp(`<(?:${THINK_TAGS.join('|')})(?:\\s[^>]*)?>[\\s\\S]*$`, 'i');
-
-/**
- * Strip <think>/<reasoning>/etc. blocks from a complete string. Also drops
- * an unterminated opening block (when the model never closes it) and trims
- * leading whitespace left behind.
- */
-export function stripThinking(text: string): string {
-	if (!text) return text;
-	let out = text.replace(THINK_BLOCK_RE, '');
-	out = out.replace(THINK_OPEN_ONLY_RE, '');
-	return out.replace(/^\s+/, '');
-}
 
 /**
  * Stream-aware filter: feed chunks of generated text in order and receive
@@ -101,104 +87,6 @@ export function createThinkFilter() {
 			return flush(tail);
 		}
 	};
-}
-
-type ExtractInput = string | AiResponse | Record<string, unknown> | null | undefined;
-
-/**
- * Robustly extract text from various AI response formats.
- */
-export function extractText(obj: ExtractInput, includeReasoning = false): string {
-	if (typeof obj === 'string') {
-		return obj;
-	}
-	if (typeof obj !== 'object' || obj === null) {
-		return '';
-	}
-
-	const response = obj as Record<string, unknown>;
-
-	if (typeof response.response === 'string') return response.response;
-	if (typeof response.text === 'string') return response.text;
-	if (typeof response.content === 'string') return response.content;
-	
-	// Handle delta objects (OpenAI-style streaming)
-	if (typeof response.delta === 'object' && response.delta !== null) {
-		const delta = response.delta as any;
-		if (typeof delta.content === 'string') return delta.content;
-		if (includeReasoning) {
-			if (typeof delta.reasoning_content === 'string') return delta.reasoning_content;
-			if (typeof delta.thought === 'string') return delta.thought;
-		}
-		// Skip reasoning_content and thought in the final extraction to prevent leaks
-		if (typeof delta.text === 'string') return delta.text;
-	}
-	if (typeof response.delta === 'string') return response.delta;
-
-	// Recursively search in common nested fields
-	if (Array.isArray(response.choices) && response.choices.length > 0)
-		return extractText(response.choices[0] as ExtractInput, includeReasoning);
-	if (response.message) return extractText(response.message as ExtractInput, includeReasoning);
-	if (response.delta) return extractText(response.delta as ExtractInput, includeReasoning);
-	if (response.tool_calls) return ''; // Skip tool calls in extraction
-	if (Array.isArray(response.candidates) && response.candidates.length > 0)
-		return extractText(response.candidates[0] as ExtractInput, includeReasoning);
-	if (response.content) return extractText(response.content as ExtractInput, includeReasoning);
-	
-	// Gemini parts
-	if (Array.isArray(response.parts) && response.parts.length > 0) {
-		let text = '';
-		for (const part of response.parts as GeminiPart[]) {
-			if (!includeReasoning && part.thought) continue; // Gemini thinking parts
-			if (part.text) text += part.text;
-		}
-		return text;
-	}
-
-	// Any other string field as a fallback, but excluding known meta/thinking fields
-	for (const key of Object.keys(response)) {
-		if (['id', 'model', 'object', 'created', 'usage', 'index', 'finish_reason', 'reasoning_content', 'thought'].includes(key)) continue;
-		if (typeof response[key] === 'string' && response[key]) return response[key] as string;
-	}
-
-	return '';
-}
-
-export function extractReasoning(obj: ExtractInput): string {
-	if (typeof obj !== 'object' || obj === null) return '';
-	const response = obj as Record<string, unknown>;
-
-	if (typeof response.delta === 'object' && response.delta !== null) {
-		const delta = response.delta as any;
-		if (typeof delta.reasoning_content === 'string') return delta.reasoning_content;
-		if (typeof delta.thought === 'string') return delta.thought;
-	}
-
-	if (Array.isArray(response.choices) && response.choices.length > 0)
-		return extractReasoning(response.choices[0] as ExtractInput);
-	if (response.message) return extractReasoning(response.message as ExtractInput);
-	if (response.delta) return extractReasoning(response.delta as ExtractInput);
-
-	if (Array.isArray(response.candidates) && response.candidates.length > 0) {
-		const candidate = response.candidates[0] as any;
-		if (candidate.content && Array.isArray(candidate.content.parts)) {
-			let reasoning = '';
-			for (const part of candidate.content.parts as GeminiPart[]) {
-				if (part.thought && part.text) reasoning += part.text;
-			}
-			return reasoning;
-		}
-	}
-	
-	if (Array.isArray(response.parts)) {
-		let reasoning = '';
-		for (const part of response.parts as GeminiPart[]) {
-			if (part.thought && part.text) reasoning += part.text;
-		}
-		return reasoning;
-	}
-
-	return '';
 }
 
 interface AiRunner {
@@ -517,7 +405,7 @@ export async function sendMessageDraft(token: string, data: Record<string, unkno
 }
 
 export interface StreamChunk {
-	type: 'content' | 'reasoning';
+	type: 'content' | 'thinking' | 'reasoning';
 	text: string;
 }
 
@@ -562,6 +450,12 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 						try {
 							const parsed = JSON.parse(data);
 							
+							const thinking = extractThinking(parsed);
+							if (thinking) {
+								onStatusUpdate?.('Thinking');
+								yield { type: 'thinking', text: thinking };
+							}
+
 							const reasoning = extractReasoning(parsed);
 							if (reasoning) {
 								onStatusUpdate?.('Reasoning');
@@ -586,6 +480,12 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 					} else {
 						try {
 							const parsed = JSON.parse(trimmed);
+							const thinking = extractThinking(parsed);
+							if (thinking) {
+								onStatusUpdate?.('Thinking');
+								yield { type: 'thinking', text: thinking };
+							}
+
 							const reasoning = extractReasoning(parsed);
 							if (reasoning) {
 								onStatusUpdate?.('Reasoning');
@@ -617,8 +517,10 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 	} else {
 		console.log(`[runStream] Response is not a stream. Type: ${typeof response}`);
 		const fullText = extractText(response as AiResponse, true);
+		const thinking = extractThinking(response as AiResponse);
 		const reasoning = extractReasoning(response as AiResponse);
 		const content = stripThinking(fullText);
+		if (thinking) yield { type: 'thinking', text: thinking };
 		if (reasoning) yield { type: 'reasoning', text: reasoning };
 		yield { type: 'content', text: content };
 	}
@@ -673,10 +575,13 @@ export interface StreamCtx {
 	replyWithStream?: StreamContextExtension['replyWithStream'];
 }
 
-async function formatTelegramMessage(content: string, reasoning?: string): Promise<string> {
+async function formatTelegramMessage(content: string, thinking?: string, reasoning?: string): Promise<string> {
 	let message = '';
+	if (thinking) {
+		message += `>**Thinking**\n${thinking}\n\n`.split('\n').map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
+	}
 	if (reasoning) {
-		message = `>**Thinking and Reasoning\n${reasoning}\n\n`;
+		message += `>**Reasoning**\n${reasoning}\n\n`.split('\n').map(line => line.startsWith('>') ? line : `>${line}`).join('\n') + '\n';
 	}
 	message += await markdownToMarkdownV2(content);
 	return message;
@@ -710,6 +615,7 @@ export async function streamAiResponseToTelegram(
 	}
 
 	let streamContent = '';
+	let thinkingContent = '';
 	let reasoningContent = '';
 	let hasSeenReasoning = false;
 
@@ -722,7 +628,9 @@ export async function streamAiResponseToTelegram(
 
 		async function* streamWithMetadata(): AsyncIterable<MessageDraftPiece> {
 			for await (const chunk of iterator) {
-				if (chunk.type === 'reasoning') {
+				if (chunk.type === 'thinking') {
+					thinkingContent += chunk.text;
+				} else if (chunk.type === 'reasoning') {
 					reasoningContent += chunk.text;
 					hasSeenReasoning = true;
 				} else {
@@ -732,8 +640,8 @@ export async function streamAiResponseToTelegram(
 
 				const now = Date.now();
 				if (now - lastDraftUpdate > 2000) {
-					const text = (streamContent || reasoningContent)
-						? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), reasoningContent + (streamContent ? '' : '...'))
+					const text = (streamContent || reasoningContent || thinkingContent)
+						? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''))
 						: (hasSeenReasoning ? 'Reasoning' : 'Thinking');
 						
 					await sendMessageDraft(token, {
@@ -764,7 +672,7 @@ export async function streamAiResponseToTelegram(
 
 		await sendMessageDraft(token, {
 			chat_id: task.chatId,
-			text: await formatTelegramMessage(streamContent, reasoningContent),
+			text: await formatTelegramMessage(streamContent, thinkingContent, reasoningContent),
 			parse_mode: 'MarkdownV2',
 			message_thread_id: task.threadId,
 			business_connection_id: task.businessConnectionId,
@@ -776,7 +684,9 @@ export async function streamAiResponseToTelegram(
 		const lastUpdate = { time: Date.now() };
 		try {
 			for await (const chunk of getAiStream(ai, modelId, messages, tools)) {
-				if (chunk.type === 'reasoning') {
+				if (chunk.type === 'thinking') {
+					thinkingContent += chunk.text;
+				} else if (chunk.type === 'reasoning') {
 					reasoningContent += chunk.text;
 					hasSeenReasoning = true;
 				} else {
@@ -786,11 +696,11 @@ export async function streamAiResponseToTelegram(
 					task.updateType !== 'guest_message' &&
 					task.updateType !== 'business_message' &&
 					Date.now() - lastUpdate.time > 2000 &&
-					(streamContent.trim() || reasoningContent.trim())
+					(streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
 				) {
 					await sendMessageDraft(token, {
 						chat_id: task.chatId,
-						text: await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), reasoningContent + (streamContent ? '' : '...')),
+						text: await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : '')),
 						parse_mode: 'MarkdownV2',
 						message_thread_id: task.threadId,
 						business_connection_id: task.businessConnectionId,
@@ -810,8 +720,8 @@ export async function streamAiResponseToTelegram(
 			streamContent = streamContent.slice(0, TEXT_LIMIT) + '\n\n[Truncated due to Telegram length limit]';
 		}
 
-		if (streamContent.trim() || reasoningContent.trim()) {
-			const finalMessage = await formatTelegramMessage(streamContent, reasoningContent);
+		if (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim()) {
+			const finalMessage = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent);
 			if (task.updateType === 'guest_message') {
 				if (task.guestQueryId) {
 					console.log('[streamAiResponseToTelegram] Answering guest_message via answerGuestQuery');
