@@ -257,6 +257,7 @@ export async function customRunWithTools(
 	while (turn < 5) {
 		const isFinalTurn = turn > 0 || cfTools.length === 0;
 		const shouldStream = isFinalTurn ? config.streamFinalResponse : false;
+		console.log(`[customRunWithTools] Turn:${turn} ShouldStream:${shouldStream} FinalTurn:${isFinalTurn}`);
 		const response = await runModel(messages, shouldStream, turn > 0);
 
 		if (shouldStream || (response && typeof (response as any).getReader === 'function')) {
@@ -289,6 +290,7 @@ export async function customRunWithTools(
 		}
 
 		const responseText = extractText(aiRes);
+		console.log(`[customRunWithTools] Turn:${turn} Tools:${toolCalls.length} TextLen:${responseText.length}`);
 
 		if (toolCalls.length > 0) {
 			const normalizedToolCalls: NormalizedToolCall[] = toolCalls.map((call, index) => {
@@ -480,11 +482,11 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							}
 
 							const text = extractText(parsed);
-							if (chunkCount <= 10) {
-								const keys = Object.keys(parsed).join(', ');
-								const hasContent = !!text;
-								console.log(`[runStream] Chunk ${chunkCount} keys: ${keys}. hasText: ${hasContent}, hasReasoning: ${!!reasoning}`);
-							}
+							const keys = Object.keys(parsed).join(',');
+							const hasContent = !!text;
+							const finishReason = parsed.choices?.[0]?.finish_reason || parsed.candidates?.[0]?.finish_reason || '';
+							console.log(`[runStream] C:${chunkCount} L:${text.length} FR:${finishReason} K:${keys} hasT:${hasContent} hasR:${!!reasoning}`);
+
 							if (text) {
 								const filtered = filter.push(text);
 								if (filtered) yield { type: 'content', text: filtered };
@@ -492,7 +494,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 								yield { type: 'content', text: '' };
 							}
 						} catch (e) {
-							console.log(`[runStream] Failed to parse JSON from line: "${trimmed.slice(0, 100)}..."`);
+							console.log(`[runStream] ERR:${chunkCount} line:"${trimmed.slice(0, 50)}..."`);
 						}
 					} else {
 						try {
@@ -510,6 +512,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							}
 
 							const text = extractText(parsed);
+							console.log(`[runStream] NC-C:${chunkCount} L:${text.length} K:${Object.keys(parsed).join(',')} hasT:${!!text} hasR:${!!reasoning}`);
 							if (text) {
 								const filtered = filter.push(text);
 								if (filtered) yield { type: 'content', text: filtered };
@@ -531,6 +534,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 		}
 		const tail = filter.end();
 		if (tail) yield { type: 'content', text: tail };
+		console.log(`[runStream] Finished. TotalChunks:${chunkCount} BufferLength:${buffer.length}`);
 	} else {
 		console.log(`[runStream] Response is not a stream. Type: ${typeof response}`);
 		const fullText = extractText(response as AiResponse, true);
@@ -617,10 +621,11 @@ export async function streamAiResponseToTelegram(
 			} else {
 				streamContent += chunk.text;
 			}
+			const now = Date.now();
 			if (
 				task.updateType !== 'guest_message' &&
 				task.updateType !== 'business_message' &&
-				Date.now() - lastUpdate.time > 2000
+				now - lastUpdate.time > 2000
 			) {
 				const text = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
 					? await formatTelegramMessage(streamContent + (streamContent ? '...' : ''), thinkingContent + (thinkingContent && !streamContent ? '...' : ''), reasoningContent + (reasoningContent && !streamContent ? '...' : ''))
@@ -634,25 +639,27 @@ export async function streamAiResponseToTelegram(
 					business_connection_id: task.businessConnectionId,
 					draft_id: draftId,
 				});
-				lastUpdate.time = Date.now();
+				console.log(`[streamAiResponseToTelegram] Draft Sent. L:${streamContent.length} T:${thinkingContent.length} R:${reasoningContent.length}`);
+				lastUpdate.time = now;
 			}
 		}
 	} catch (e) {
-		console.error('[streamAiResponseToTelegram] Error during AI streaming:', e);
+		console.error(`[streamAiResponseToTelegram] Loop Error:`, e);
 	}
-	console.log(`[streamAiResponseToTelegram] Stream finished. Content length: ${streamContent.length}`);
+	console.log(`[streamAiResponseToTelegram] Stream finished. ContentLength: ${streamContent.length}`);
 
 	const TEXT_LIMIT = 3800;
 	if (streamContent.length > TEXT_LIMIT) {
-		console.log(`[streamAiResponseToTelegram] Content length (${streamContent.length}) exceeds limit. Truncating...`);
+		console.log(`[streamAiResponseToTelegram] Limit Reached. ${streamContent.length} > ${TEXT_LIMIT}`);
 		streamContent = streamContent.slice(0, TEXT_LIMIT) + '\n\n[Truncated due to Telegram length limit]';
 	}
 
 	if (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim()) {
 		const finalMessage = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent);
+		console.log(`[streamAiResponseToTelegram] Final Message Len: ${finalMessage.length}`);
 		if (task.updateType === 'guest_message') {
 			if (task.guestQueryId) {
-				console.log('[streamAiResponseToTelegram] Answering guest_message via answerGuestQuery');
+				console.log('[streamAiResponseToTelegram] answerGuestQuery');
 				await ctx.api
 					.answerGuestQuery(task.guestQueryId, {
 						type: 'article',
@@ -663,12 +670,12 @@ export async function streamAiResponseToTelegram(
 							parse_mode: 'MarkdownV2',
 						},
 					})
-					.catch((e: unknown) => console.log('Error answering guest query:', e));
+					.catch((e: unknown) => console.log('Guest Error:', e));
 			} else {
-				console.log('[streamAiResponseToTelegram] guest_message has no guestQueryId, cannot answer');
+				console.log('[streamAiResponseToTelegram] no guestQueryId');
 			}
 		} else if (task.updateType === 'business_message') {
-			console.log('[streamAiResponseToTelegram] Sending final sendMessage for business_message');
+			console.log('[streamAiResponseToTelegram] sendMessage (business)');
 			await ctx.api
 				.sendMessage(task.chatId!, finalMessage, {
 					parse_mode: 'MarkdownV2',
@@ -676,9 +683,9 @@ export async function streamAiResponseToTelegram(
 					business_connection_id: task.businessConnectionId,
 					reply_to_message_id: task.messageId,
 				})
-				.catch((e: unknown) => console.log('Error sending final business message:', e));
+				.catch((e: unknown) => console.log('Business Message Error:', e));
 		} else {
-			console.log('[streamAiResponseToTelegram] Sending final sendMessageDraft and sendMessage');
+			console.log('[streamAiResponseToTelegram] final sendMessageDraft and sendMessage');
 			await sendMessageDraft(token, {
 				chat_id: task.chatId,
 				text: finalMessage,
@@ -694,7 +701,7 @@ export async function streamAiResponseToTelegram(
 					message_thread_id: task.threadId,
 					business_connection_id: task.businessConnectionId,
 					reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
-				}).catch((e: unknown) => console.log('Error sending final message:', e));
+				}).catch((e: unknown) => console.log('Final Message Error:', e));
 			}
 		}
 	}
