@@ -162,32 +162,37 @@ export async function parseTelegramFile(
 			}
 
 			const chunks = chunkText(rawText, 1000, 200);
-			console.log(`[parseTelegramFile] Chunked document into ${chunks.length} chunks. Generating embeddings sequentially...`);
+			console.log(`[parseTelegramFile] Chunked document into ${chunks.length} chunks. Generating embeddings in parallel...`);
 
-			// Generate embeddings sequentially to avoid GPU memory limits on batch operations
-			const embedData: number[][] = [];
-			for (let i = 0; i < chunks.length; i++) {
-				console.log(`[parseTelegramFile] Generating embedding for chunk ${i + 1}/${chunks.length}...`);
-				const res = (await env.AI.run('@cf/baai/bge-large-en-v1.5', {
-					text: [chunks[i]]
-				})) as { data: number[][] };
-				if (res && res.data && res.data[0]) {
-					embedData.push(res.data[0]);
-				} else {
-					console.error(`[parseTelegramFile] Failed to generate embedding for chunk ${i}`);
+			// Generate embeddings in parallel to prevent sequential wall-clock request timeouts
+			const embedResPromises = chunks.map(async (chunk, idx) => {
+				try {
+					const res = (await env.AI.run('@cf/baai/bge-large-en-v1.5', {
+						text: [chunk]
+					})) as { data: number[][] };
+					if (res && res.data && res.data[0]) {
+						console.log(`[parseTelegramFile] Completed embedding for chunk ${idx + 1}/${chunks.length}`);
+						return { index: idx, vector: res.data[0], chunk };
+					}
+				} catch (e) {
+					console.error(`[parseTelegramFile] Failed to generate embedding for chunk ${idx}:`, e);
 				}
-			}
+				return null;
+			});
 
-			if (embedData.length > 0) {
+			const embedDataRaw = await Promise.all(embedResPromises);
+			const cleanEmbedData = embedDataRaw.filter((d): d is { index: number; vector: number[]; chunk: string } => d !== null);
+
+			if (cleanEmbedData.length > 0) {
 				const fileHash = await getShortHash(file_id);
-				const vectors = chunks.slice(0, embedData.length).map((chunk, idx) => ({
-					id: `${fileHash}_${idx}`,
-					values: embedData[idx],
+				const vectors = cleanEmbedData.map((item) => ({
+					id: `${fileHash}_${item.index}`,
+					values: item.vector,
 					metadata: {
 						file_id,
 						file_name,
-						text: chunk,
-						chunk_index: idx
+						text: item.chunk,
+						chunk_index: item.index
 					}
 				}));
 
