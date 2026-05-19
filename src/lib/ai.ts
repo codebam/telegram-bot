@@ -529,9 +529,9 @@ export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMe
 		console.log(`[getAiStream] Attempting primary model: ${model}`);
 		const iterator = runStream(ai, model, messages, tools)[Symbol.asyncIterator]();
 
-		// Set to 2.5 seconds to comfortably complete fallback inside Telegram's 5s Webhook timeout
+		// Set to 10 seconds to allow time for tool execution and multi-turn inference
 		const timeoutPromise = new Promise<never>((_, reject) =>
-			setTimeout(() => reject(new Error('TTFT_TIMEOUT')), 2500)
+			setTimeout(() => reject(new Error('TTFT_TIMEOUT')), 10000)
 		);
 
 		const firstResult = await Promise.race([
