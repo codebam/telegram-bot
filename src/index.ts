@@ -1,4 +1,5 @@
 import { Bot, Api, Context, webhookCallback, session, GrammyError, HttpError } from 'grammy';
+import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { stream, type StreamFlavor } from '@grammyjs/stream';
 import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
@@ -169,9 +170,9 @@ async function chargeStars(
 			task.history = await historyManager.getHistory(userId, task.threadId);
 		}
 
-		ctx.executionCtx.waitUntil(
-			processTask(task, ctx.env)
-		);
+		await ctx.env.STREAM_WORKFLOW.create({
+			params: task,
+		});
 	} else {
 		if (ctx.update.business_message || ctx.update.guest_message) {
 			await ctx.reply(
@@ -635,43 +636,18 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	commands.command('stream', 'Stream incrementing numbers', async (ctx) => {
-		const draftId = Date.now();
 		const chatId = ctx.chat?.id;
-		const businessConnectionId = ctx.update.business_message?.business_connection_id;
-
 		if (!chatId) return;
 
-		ctx.executionCtx.waitUntil(
-			(async () => {
-				for (let i = 1; i <= 20; i++) {
-					try {
-						if (i === 20) {
-							await sendMessageDraft(ctx.api, {
-								chat_id: chatId,
-								text: i.toString(),
-								draft_id: draftId,
-								business_connection_id: businessConnectionId,
-								finish: true,
-							});
-							await ctx.api.sendMessage(chatId, i.toString(), {
-								business_connection_id: businessConnectionId,
-							});
-						} else {
-							await sendMessageDraft(ctx.api, {
-								chat_id: chatId,
-								text: i.toString(),
-								draft_id: draftId,
-								business_connection_id: businessConnectionId,
-							});
-							await new Promise((resolve) => setTimeout(resolve, 2000));
-						}
-					} catch (e) {
-						console.error(`[streamCommand] Error at step ${i}:`, e);
-						break;
-					}
-				}
-			})(),
-		);
+		await ctx.env.STREAM_WORKFLOW.create({
+			params: {
+				type: 'code',
+				prompt: '/stream',
+				chatId: String(chatId),
+				updateId: Date.now(),
+				businessConnectionId: ctx.update.business_message?.business_connection_id,
+			},
+		});
 	});
 
 	bot.use(commands);
@@ -706,7 +682,9 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			return;
 		}
 		task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
-		ctx.executionCtx.waitUntil(processTask(task, ctx.env));
+		await ctx.env.STREAM_WORKFLOW.create({
+			params: task,
+		});
 		await ctx.env.CONVERSATION_HISTORY.delete(`task:${taskId}`);
 	});
 
@@ -939,7 +917,50 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 	}
 }
 
+export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
+	async run(event: WorkflowEvent<Task>, step: WorkflowStep) {
+		const task = event.payload;
+		const env = this.env;
+
+		if (task.type === 'message' || task.type === 'business_message' || task.type === 'tool_call' || task.type === 'photo') {
+			await step.do('process task', async () => {
+				await processTask(task, env);
+			});
+		} else if (task.type === 'code' && task.prompt === '/stream') {
+			const draftId = task.updateId || Date.now();
+			for (let i = 1; i <= 20; i++) {
+				await step.do(`step ${i}`, async () => {
+					const api = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN).api;
+					if (i === 20) {
+						await sendMessageDraft(api, {
+							chat_id: task.chatId,
+							text: i.toString(),
+							draft_id: draftId,
+							business_connection_id: task.businessConnectionId,
+							finish: true,
+						});
+						await api.sendMessage(task.chatId!, i.toString(), {
+							business_connection_id: task.businessConnectionId,
+						});
+					} else {
+						await sendMessageDraft(api, {
+							chat_id: task.chatId,
+							text: i.toString(),
+							draft_id: draftId,
+							business_connection_id: task.businessConnectionId,
+						});
+					}
+				});
+				if (i < 20) {
+					await step.sleep(`sleep ${i}`, '2 seconds');
+				}
+			}
+		}
+	}
+}
+
 export default {
+	BotWorkflow,
 	async fetch(request: Request, env: Environment, executionCtx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const xSource = request.headers.get('x-source');

@@ -30,6 +30,11 @@ name = "Sandbox"
 new_sqlite_classes = ["Sandbox"]
 tag = "v1"
 
+[[workflows]]
+name = "bot-workflow"
+binding = "STREAM_WORKFLOW"
+class_name = "BotWorkflow"
+
 [env.dev]
 name = "tux-robot-dev"
 
