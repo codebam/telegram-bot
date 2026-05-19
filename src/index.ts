@@ -539,7 +539,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			let promptValue = ctx.match.trim();
 			if (promptValue === 'reset' || promptValue === '""' || promptValue === "''" || promptValue === '') {
 				await ctx.env.CONVERSATION_HISTORY.delete(`prompt:${String(ctx.from.id)}`);
-				await ctx.reply('System prompt reset to default.');
+				await ctx.reply(`System prompt reset to default:\n\n${SYSTEM_PROMPTS.TUX_ROBOT}`);
 			} else {
 				if (
 					(promptValue.startsWith('"') && promptValue.endsWith('"')) ||
