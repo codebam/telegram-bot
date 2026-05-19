@@ -507,7 +507,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 						} catch (e) {
 							console.log(`[runStream] JSON ERR:${chunkCount} line:"${trimmed.slice(0, 40)}..."`);
 						}
-					} else {
+					} else if (trimmed.startsWith('{')) {
 						try {
 							const parsed = JSON.parse(trimmed);
 							const thinking = extractThinking(parsed);
@@ -533,7 +533,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 								yield { type: 'content', text: '' };
 							}
 						} catch {
-							// Not JSON, ignore
+							// Not valid JSON after all, ignore
 						}
 					}
 				}
