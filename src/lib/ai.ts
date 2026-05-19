@@ -207,8 +207,8 @@ export async function customRunWithTools(
 		parameters: t.parameters,
 	}));
 
-	const runModel = async (msgs: ChatMessage[], stream: boolean) => {
-		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}`);
+	const runModel = async (msgs: ChatMessage[], stream: boolean, omitTools = false) => {
+		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}, OmitTools: ${omitTools}`);
 		try {
 			if (isGemini) {
 				const systemMessage = msgs.find((m) => m.role === 'system');
@@ -228,7 +228,7 @@ export async function customRunWithTools(
 						if (m.content) parts.push({ text: m.content });
 						return { role, parts };
 					}),
-					tools: cfTools.length > 0 ? [{ functionDeclarations: cfTools }] : undefined,
+					tools: (!omitTools && cfTools.length > 0) ? [{ functionDeclarations: cfTools }] : undefined,
 					stream,
 				};
 				if (systemMessage?.content) {
@@ -241,10 +241,10 @@ export async function customRunWithTools(
 
 			const options: Record<string, unknown> = {
 				messages: msgs,
-				tools: cfTools.length > 0 ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
+				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
 				stream,
-				parallel_tool_calls: false,
-				tool_choice: 'auto',
+				parallel_tool_calls: (!omitTools && cfTools.length > 0) ? false : undefined,
+				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
 			};
 
 			return await ai.run(model, options);
@@ -378,7 +378,7 @@ export async function customRunWithTools(
 			}
 		} else {
 			if (config.streamFinalResponse) {
-				return (await runModel(messages, true)) as ReadableStream;
+				return (await runModel(messages, true, true)) as ReadableStream;
 			}
 			return aiRes;
 		}
@@ -386,7 +386,7 @@ export async function customRunWithTools(
 	}
 
 	console.log('[customRunWithTools] Maximum turns reached.');
-	return (await runModel(messages, config.streamFinalResponse)) as AiResponse | ReadableStream;
+	return (await runModel(messages, config.streamFinalResponse, true)) as AiResponse | ReadableStream;
 }
 
 export async function sendMessageDraft(token: string, data: Record<string, unknown>) {
