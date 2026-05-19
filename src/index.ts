@@ -344,6 +344,10 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 							}
 							return prompt;
 						}
+						const isFileTask = !!ctx.message?.document || !!(replyToMessage && replyToMessage.document);
+						if (isFileTask) {
+							return 'You are a helpful assistant.';
+						}
 						const customPrompt = await env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
 						return customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
 					});
