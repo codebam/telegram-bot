@@ -1,6 +1,16 @@
 import { getSandbox, type Sandbox } from '@cloudflare/sandbox';
 import { AVAILABLE_MODELS, type ChatMessage } from '@codebam/shared';
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+	let binary = '';
+	const bytes = new Uint8Array(buffer);
+	const len = bytes.byteLength;
+	for (let i = 0; i < len; i++) {
+		binary += String.fromCharCode(bytes[i]);
+	}
+	return btoa(binary);
+}
+
 export const createTelegramFileReaderTool = (
 	telegramToken: string,
 	sandboxBinding: DurableObjectNamespace<Sandbox>,
@@ -38,14 +48,16 @@ export const createTelegramFileReaderTool = (
 
 				const downloadUrl = `https://api.telegram.org/file/bot${telegramToken}/${getFileData.result.file_path}`;
 				const downloadRes = await fetch(downloadUrl);
-				if (!downloadRes.ok || !downloadRes.body) {
+				if (!downloadRes.ok) {
 					return `Error: Failed to download file from Telegram. Status: ${downloadRes.status}`;
 				}
+				const arrayBuffer = await downloadRes.arrayBuffer();
+				const base64Content = arrayBufferToBase64(arrayBuffer);
 
-				const sandbox = getSandbox(sandboxBinding, userId, { transport: 'rpc' });
+				const sandbox = getSandbox(sandboxBinding, userId);
 				const safeFileName = file_name.replace(/[^a-zA-Z0-9.-]/g, '_');
 				const sandboxPath = `/workspace/${safeFileName}`;
-				await sandbox.writeFile(sandboxPath, downloadRes.body);
+				await sandbox.writeFile(sandboxPath, base64Content, { encoding: 'base64' });
 
 				const pythonCode = `
 import sys
@@ -53,32 +65,17 @@ import os
 import json
 import base64
 
-try:
-    import fitz
-except ImportError:
-    import subprocess
-    subprocess.run([sys.executable, "-m", "pip", "install", "pymupdf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    import fitz
-
-try:
-    import docx
-except ImportError:
-    import subprocess
-    subprocess.run([sys.executable, "-m", "pip", "install", "python-docx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    import docx
-
-try:
-    import pptx
-except ImportError:
-    import subprocess
-    subprocess.run([sys.executable, "-m", "pip", "install", "python-pptx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    import pptx
-
 def process_file(file_path, supports_vision):
     ext = os.path.splitext(file_path)[1].lower()
     result = {"text": "", "images": []}
     
     if ext == '.pdf':
+        try:
+            import fitz
+        except ImportError:
+            import subprocess
+            subprocess.run([sys.executable, "-m", "pip", "install", "pymupdf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import fitz
         try:
             doc = fitz.open(file_path)
             text_list = []
@@ -97,12 +94,24 @@ def process_file(file_path, supports_vision):
             
     elif ext == '.docx':
         try:
+            import docx
+        except ImportError:
+            import subprocess
+            subprocess.run([sys.executable, "-m", "pip", "install", "python-docx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import docx
+        try:
             doc = docx.Document(file_path)
             result["text"] = "\\n".join([p.text for p in doc.paragraphs])
         except Exception as e:
             result["text"] = f"Error parsing DOCX: {str(e)}"
             
     elif ext == '.pptx':
+        try:
+            import pptx
+        except ImportError:
+            import subprocess
+            subprocess.run([sys.executable, "-m", "pip", "install", "python-pptx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import pptx
         try:
             prs = pptx.Presentation(file_path)
             text_list = []
