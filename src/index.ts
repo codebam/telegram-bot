@@ -6,7 +6,7 @@ import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
-import { HistoryManager, getBalance, markdownToMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
+import { HistoryManager, getBalance, markdownToMarkdownV2, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
@@ -290,7 +290,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 			if (prompt) {
 				if (geminiParts.some((p) => p.inlineData) && !modelConfig.supportsVision) {
 					await ctx.reply(
-						`⚠️ Your current model (*${modelPreference}*) does not support vision/images.\n\n` +
+						`⚠️ Your current model (*${sanitizeMarkdownV2(modelPreference)}*) does not support vision/images.\n\n` +
 							`Please switch to a vision-enabled model using:\n` +
 							`- \`/model kimi-k2.6\` (40 Stars)\n` +
 							`- \`/model gemma4\` (10 Stars)\n` +
@@ -495,17 +495,17 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		if (selectedModel) {
 			if (selectedModel in AVAILABLE_MODELS) {
 				await ctx.env.CONVERSATION_HISTORY.put(modelKey, selectedModel);
-				await ctx.reply(`Model updated to *${selectedModel}*.`, { parse_mode: 'MarkdownV2' });
+				await ctx.reply(`Model updated to *${sanitizeMarkdownV2(selectedModel)}*.`, { parse_mode: 'MarkdownV2' });
 			} else {
 				await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
 			}
 		} else {
 			const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'glm-4.7-flash';
 			await ctx.reply(
-				`Current model: *${currentModel}*\n\n` +
+				`Current model: *${sanitizeMarkdownV2(currentModel)}*\n\n` +
 					`Available models:\n` +
 					Object.entries(AVAILABLE_MODELS)
-						.map(([name, cfg]) => `- \`${name}\` (${String(cfg.cost)} Stars)`)
+						.map(([name, cfg]) => `- \`${sanitizeMarkdownV2(name)}\` (${String(cfg.cost)} Stars)`)
 						.join('\n'),
 				{ parse_mode: 'MarkdownV2' },
 			);
