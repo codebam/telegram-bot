@@ -13,6 +13,14 @@ function chunkText(text: string, chunkSize = 1000, overlap = 200): string[] {
 	return chunks;
 }
 
+async function getShortHash(str: string): Promise<string> {
+	const msgUint8 = new TextEncoder().encode(str);
+	const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+	const hashArray = Array.from(new Uint8Array(hashBuffer));
+	const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+	return hashHex.slice(0, 32);
+}
+
 function extractPrintableStrings(buffer: ArrayBuffer): string {
 	const bytes = new Uint8Array(buffer);
 	let result = '';
@@ -158,8 +166,9 @@ export async function parseTelegramFile(
 			})) as { data: number[][] };
 
 			if (embedRes && embedRes.data && embedRes.data.length > 0) {
+				const fileHash = await getShortHash(file_id);
 				const vectors = chunks.map((chunk, idx) => ({
-					id: `${file_id}_${idx}`,
+					id: `${fileHash}_${idx}`,
 					values: embedRes.data[idx],
 					metadata: {
 						file_id,
