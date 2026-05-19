@@ -406,22 +406,43 @@ export async function customRunWithTools(
 	return finalResponse as AiResponse;
 }
 
-export async function sendMessageDraft(token: string, data: Record<string, unknown>) {
+export async function sendMessageDraft(token: string, data: Record<string, unknown>, retries = 3) {
 	const textLen = typeof data.text === 'string' ? data.text.length : 0;
-	try {
-		const response = await fetch(`https://api.telegram.org/bot${token}/sendMessageDraft`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(data),
-		});
-		if (!response.ok) {
-			const errorText = await response.text();
-			console.error(`[sendMessageDraft] Failed. Status: ${response.status}, Len: ${textLen}, Error: ${errorText}`);
-		} else {
-			console.log(`[sendMessageDraft] Success. Len: ${textLen}, Status: ${response.status}`);
+	for (let i = 0; i < retries; i++) {
+		try {
+			const controller = new AbortController();
+			const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
+			const response = await fetch(`https://api.telegram.org/bot${token}/sendMessageDraft`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(data),
+				signal: controller.signal,
+			});
+			clearTimeout(timeoutId);
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				console.error(`[sendMessageDraft] Attempt ${i + 1} Failed. Status: ${response.status}, Len: ${textLen}, Error: ${errorText}`);
+				if (response.status === 429) {
+					// Too Many Requests, wait and retry
+					const retryAfter = parseInt(response.headers.get('retry-after') || '1') * 1000;
+					await new Promise(resolve => setTimeout(resolve, retryAfter));
+					continue;
+				}
+				if (response.status >= 500) {
+					await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+					continue;
+				}
+				break; // Don't retry other 4xx errors
+			} else {
+				console.log(`[sendMessageDraft] Success. Len: ${textLen}, Status: ${response.status}`);
+				return;
+			}
+		} catch (e: any) {
+			console.error(`[sendMessageDraft] Attempt ${i + 1} Exception. Len: ${textLen}, Error:`, e.name === 'AbortError' ? 'Timeout' : e);
+			await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
 		}
-	} catch (e) {
-		console.error(`[sendMessageDraft] Exception. Len: ${textLen}, Error:`, e);
 	}
 }
 
