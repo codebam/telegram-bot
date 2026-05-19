@@ -1,27 +1,18 @@
-import { getSandbox, type Sandbox } from '@cloudflare/sandbox';
+import { getDocumentProxy, extractText } from 'unpdf';
+import JSZip from 'jszip';
 import { AVAILABLE_MODELS, type ChatMessage } from '@codebam/shared';
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-	let binary = '';
-	const bytes = new Uint8Array(buffer);
-	const len = bytes.byteLength;
-	for (let i = 0; i < len; i++) {
-		binary += String.fromCharCode(bytes[i]);
-	}
-	return btoa(binary);
-}
 
 export async function parseTelegramFile(
 	telegramToken: string,
-	sandboxBinding: DurableObjectNamespace<Sandbox>,
-	userId: string,
+	_sandboxBinding: unknown, // keeping for signature compatibility
+	_userId: string, // keeping for signature compatibility
 	file_id: string,
 	file_name: string,
-	supportsVision: boolean,
-	messages?: ChatMessage[]
+	_supportsVision: boolean,
+	_messages?: ChatMessage[]
 ): Promise<string> {
 	try {
-		console.log(`[parseTelegramFile] FileID: ${file_id}, Name: ${file_name}, SupportsVision: ${supportsVision}`);
+		console.log(`[parseTelegramFile] Native JS parsing triggered for FileID: ${file_id}, Name: ${file_name}`);
 		
 		const getFileUrl = `https://api.telegram.org/bot${telegramToken}/getFile?file_id=${file_id}`;
 		const getFileRes = await fetch(getFileUrl);
@@ -42,148 +33,63 @@ export async function parseTelegramFile(
 			return `Error: Failed to download file from Telegram. Status: ${downloadRes.status}`;
 		}
 		const arrayBuffer = await downloadRes.arrayBuffer();
-		const base64Content = arrayBufferToBase64(arrayBuffer);
-		console.log(`[parseTelegramFile] File downloaded from Telegram. Base64 length: ${base64Content.length} bytes`);
+		console.log(`[parseTelegramFile] File downloaded from Telegram. Size: ${arrayBuffer.byteLength} bytes`);
 
-		const sandbox = getSandbox(sandboxBinding, userId);
-		const safeFileName = file_name.replace(/[^a-zA-Z0-9.-]/g, '_');
-		const sandboxPath = `/workspace/${safeFileName}`;
+		const ext = file_name.substring(file_name.lastIndexOf('.')).toLowerCase();
+
+		if (ext === '.pdf') {
+			console.log(`[parseTelegramFile] Parsing PDF via unpdf...`);
+			const pdf = await getDocumentProxy(new Uint8Array(arrayBuffer));
+			const { totalPages, text } = await extractText(pdf, { mergePages: true });
+			console.log(`[parseTelegramFile] PDF parsed successfully. Total Pages: ${totalPages}, Text Length: ${text.length}`);
+			return text || 'PDF parsed successfully but no text content found.';
+		}
 		
-		let retries = 3;
-		while (retries > 0) {
-			try {
-				await sandbox.writeFile(sandboxPath, base64Content, { encoding: 'base64' });
-				console.log(`[parseTelegramFile] sandbox.writeFile completed for path: ${sandboxPath}`);
-				break;
-			} catch (err) {
-				retries--;
-				console.warn(`[parseTelegramFile] writeFile failed. Retries left: ${retries}. Error:`, err);
-				if (retries === 0) throw err;
-				await new Promise((resolve) => setTimeout(resolve, 2000));
+		if (ext === '.docx') {
+			console.log(`[parseTelegramFile] Parsing DOCX via JSZip...`);
+			const zip = await JSZip.loadAsync(arrayBuffer);
+			const documentXml = await zip.file('word/document.xml')?.async('text');
+			if (!documentXml) {
+				return 'Error: word/document.xml not found in DOCX zip.';
 			}
+			const matches = documentXml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
+			const text = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
+			console.log(`[parseTelegramFile] DOCX parsed successfully. Text Length: ${text.length}`);
+			return text.trim() || 'DOCX parsed successfully but no text content found.';
 		}
 
-		console.log(`[parseTelegramFile] Starting Python parser in sandbox...`);
-		const pythonCode = `
-import sys
-import os
-import json
-import base64
+		if (ext === '.pptx') {
+			console.log(`[parseTelegramFile] Parsing PPTX via JSZip...`);
+			const zip = await JSZip.loadAsync(arrayBuffer);
+			const slideTexts: string[] = [];
+			const files = Object.keys(zip.files).filter(name => name.startsWith('ppt/slides/slide') && name.endsWith('.xml'));
+			files.sort((a, b) => {
+				const numA = parseInt(a.replace(/[^0-9]/g, ''), 10);
+				const numB = parseInt(b.replace(/[^0-9]/g, ''), 10);
+				return numA - numB;
+			});
 
-def process_file(file_path, supports_vision):
-    ext = os.path.splitext(file_path)[1].lower()
-    result = {"text": "", "images": []}
-    
-    if ext == '.pdf':
-        try:
-            import pypdf
-            reader = pypdf.PdfReader(file_path)
-            text_list = []
-            for i, page in enumerate(reader.pages):
-                text_list.append(f"--- Page {i+1} ---\\n" + (page.extract_text() or ""))
-            result["text"] = "\\n".join(text_list)
-        except ImportError:
-            try:
-                import fitz
-                doc = fitz.open(file_path)
-                text_list = []
-                for i, page in enumerate(doc):
-                    text_list.append(f"--- Page {i+1} ---\\n" + page.get_text())
-                result["text"] = "\\n".join(text_list)
-            except ImportError:
-                result["text"] = "Error: PDF parsing libraries (pypdf, pymupdf) are not pre-installed in the sandbox environment."
-        
-        if supports_vision:
-            try:
-                import subprocess
-                subprocess.run(["pdftoppm", "-jpeg", "-f", "1", "-l", "5", "-r", "150", file_path, "/tmp/page"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                for i in range(1, 6):
-                    img_path = f"/tmp/page-{i}.jpg"
-                    if os.path.exists(img_path):
-                        with open(img_path, "rb") as img_file:
-                            result["images"].append(base64.b64encode(img_file.read()).decode("utf-8"))
-            except Exception:
-                pass
-            
-    elif ext == '.docx':
-        try:
-            import docx
-            doc = docx.Document(file_path)
-            result["text"] = "\\n".join([p.text for p in doc.paragraphs])
-        except ImportError:
-            result["text"] = "Error: DOCX parsing library (docx) is not pre-installed in the sandbox environment."
-        except Exception as e:
-            result["text"] = f"Error parsing DOCX: {str(e)}"
-            
-    elif ext == '.pptx':
-        try:
-            import pptx
-            prs = pptx.Presentation(file_path)
-            text_list = []
-            for i, slide in enumerate(prs.slides):
-                slide_text = []
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text:
-                        slide_text.append(shape.text)
-                text_list.append(f"--- Slide {i+1} ---\\n" + "\\n".join(slide_text))
-            result["text"] = "\\n".join(text_list)
-        except ImportError:
-            result["text"] = "Error: PPTX parsing library (pptx) is not pre-installed in the sandbox environment."
-        except Exception as e:
-            result["text"] = f"Error parsing PPTX: {str(e)}"
-            
-    else:
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                result["text"] = f.read()
-        except Exception as e:
-            result["text"] = f"Error reading text file: {str(e)}"
-            
-    return result
-
-res = process_file(${JSON.stringify(sandboxPath)}, ${supportsVision ? 'True' : 'False'})
-print(json.dumps(res))
-`;
-
-		const execResult = await sandbox.runCode(pythonCode, { language: 'python' });
-		const stdout = execResult.logs.stdout.join('');
-		const stderr = execResult.logs.stderr.join('');
-		console.log(`[parseTelegramFile] Python execution done. Error: ${execResult.error ? execResult.error.message : 'none'}. Stdout size: ${stdout.length}, Stderr size: ${stderr.length}`);
-
-		if (execResult.error) {
-			console.error(`[parseTelegramFile] Python error:`, execResult.error);
-			return `Error executing document parser: ${execResult.error.message}\nStderr: ${stderr}`;
-		}
-
-		try {
-			const parsedResult = JSON.parse(stdout.trim()) as { text: string; images: string[] };
-
-			if (parsedResult.images && parsedResult.images.length > 0 && messages) {
-				const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
-				if (lastUserMsg) {
-					if (!lastUserMsg.geminiParts) {
-						lastUserMsg.geminiParts = [];
-						if (lastUserMsg.content) {
-							lastUserMsg.geminiParts.push({ text: lastUserMsg.content });
-						}
+			for (const file of files) {
+				const slideXml = await zip.file(file)?.async('text');
+				if (slideXml) {
+					const slideNum = file.replace(/[^0-9]/g, '');
+					const matches = slideXml.match(/<a:t[^>]*>([^<]*)<\/a:t>/g) || [];
+					const text = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
+					if (text.trim()) {
+						slideTexts.push(`--- Slide ${slideNum} ---\n${text.trim()}`);
 					}
-					for (const imgBase64 of parsedResult.images) {
-						lastUserMsg.geminiParts.push({
-							inlineData: {
-								mimeType: 'image/jpeg',
-								data: imgBase64,
-							},
-						});
-					}
-					console.log(`[parseTelegramFile] Attached ${parsedResult.images.length} page images to Gemini parts`);
 				}
 			}
-
-			return parsedResult.text || 'Document parsed successfully but no text content found.';
-		} catch (e) {
-			console.error(`[parseTelegramFile] JSON Parse Error. Stdout:`, stdout, `Error:`, e);
-			return `Error: Failed to parse tool output. Stdout: ${stdout}\nStderr: ${stderr}`;
+			console.log(`[parseTelegramFile] PPTX parsed successfully. Total slides parsed: ${slideTexts.length}`);
+			return slideTexts.join('\n\n') || 'PPTX parsed successfully but no text content found.';
 		}
+
+		// Fallback for all other text files (txt, md, js, json, csv, etc.)
+		console.log(`[parseTelegramFile] Reading file as plain text...`);
+		const decoder = new TextDecoder('utf-8');
+		const text = decoder.decode(arrayBuffer);
+		return text || 'Text file is empty.';
+
 	} catch (e) {
 		console.error(`[parseTelegramFile] Unexpected error:`, e);
 		return `Error executing parseTelegramFile: ${String(e)}`;
@@ -192,7 +98,7 @@ print(json.dumps(res))
 
 export const createTelegramFileReaderTool = (
 	telegramToken: string,
-	sandboxBinding: DurableObjectNamespace<Sandbox>,
+	sandboxBinding: unknown,
 	userId: string,
 	messages: ChatMessage[],
 	modelId: string
@@ -202,7 +108,7 @@ export const createTelegramFileReaderTool = (
 
 	return {
 		name: 'read_telegram_file',
-		description: 'Read the contents of a Telegram file (such as PDF, DOCX, PPTX, or text files) given its file_id and file_name. If the file is a PDF and the model supports vision, it will also render PDF pages as images and attach them directly to the conversation history so you can see them.',
+		description: 'Read the contents of a Telegram file (such as PDF, DOCX, PPTX, or text files) given its file_id and file_name.',
 		parameters: {
 			type: 'object',
 			properties: {
