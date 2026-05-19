@@ -479,6 +479,8 @@ export async function sendMessageDraft(token: string, data: Record<string, unkno
  */
 async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], tools: Tool[] = [], onStatusUpdate?: (status: 'Thinking' | 'Reasoning') => void): AsyncGenerator<string, void, unknown> {
 	console.log(`[runStream] Starting stream for model: ${model}`);
+	yield ''; // Yield immediately to satisfy TTFT and unblock UI
+
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
 	const filter = createThinkFilter();
 
@@ -533,8 +535,8 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							if (text) {
 								const filtered = filter.push(text);
 								if (filtered) yield filtered;
-							} else if (isReasoning) {
-								// Yield empty string to unblock consumer and allow status updates
+							} else {
+								// Always yield to unblock consumer and allow status updates
 								yield '';
 							}
 						} catch (e) {
@@ -562,7 +564,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							if (text) {
 								const filtered = filter.push(text);
 								if (filtered) yield filtered;
-							} else if (isReasoning) {
+							} else {
 								yield '';
 							}
 						} catch {
