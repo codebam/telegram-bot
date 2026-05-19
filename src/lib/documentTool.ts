@@ -287,7 +287,7 @@ export const createTelegramFileSearchTool = (
 						file_name || 'document.md',
 						false,
 						undefined,
-						5000
+						30000
 					);
 					console.log(`[search_telegram_file] On-the-fly indexing result:`, parseResult);
 					intro = await env.CONVERSATION_HISTORY.get<string>(introKey);

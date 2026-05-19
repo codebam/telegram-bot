@@ -264,22 +264,13 @@ export async function customRunWithTools(
 					if (cleanMessage.content === null || cleanMessage.content === undefined) {
 						cleanMessage.content = '';
 					}
-					// Mapping for legacy function calling
-					if (cleanMessage.role === 'tool') {
-						cleanMessage.role = 'function';
-						cleanMessage.name = m.name;
-						delete cleanMessage.tool_call_id;
-					}
-					if (cleanMessage.role === 'assistant' && cleanMessage.tool_calls?.length > 0) {
-						cleanMessage.function_call = cleanMessage.tool_calls[0].function;
-						delete cleanMessage.tool_calls;
-					}
 					// Remove internal geminiParts before sending to CF
 					delete cleanMessage.geminiParts;
 					return cleanMessage;
 				}),
-				functions: (!omitTools && cfTools.length > 0) ? cfTools : undefined,
-				function_call: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
+				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
+				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
+				parallel_tool_calls: (!omitTools && cfTools.length > 0) ? false : undefined,
 				stream,
 			};
 
