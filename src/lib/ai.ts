@@ -662,8 +662,13 @@ function createOptimisticApi(raw: any): any {
 					try {
 						return await target[prop](data, signal);
 					} catch (e: any) {
-						// Catch Markdown/HTML parsing errors
+						// Catch MarkdownV2 parsing errors
 						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
+							// If we already tried escaping or the message has existing escapes, don't double escape
+							if (data.text.includes('\\.') || data.text.includes('\\-') || data.text.includes('\\!')) {
+								console.warn(`[OptimisticApi] ${prop} failed and already looks escaped. Not retrying.`);
+								throw e;
+							}
 							console.warn(`[OptimisticApi] ${prop} failed, retrying with escaped text. Error: ${e.description}`);
 							const escapedData = {
 								...data,
@@ -739,14 +744,18 @@ export async function* getTelegramStream(
 				if (filtered) streamContent += filtered;
 			}
 
-			const snapshot = (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim())
-				? await formatTelegramMessage(
-						streamContent + (streamContent ? '...' : ''),
-						thinkingContent + (thinkingContent && !streamContent ? '...' : ''),
-						reasoningContent + (reasoningContent && !streamContent ? '...' : ''),
-						false
-				  )
-				: { text: (hasSeenReasoning ? '> Reasoning' : '> Thinking'), parse_mode: 'MarkdownV2' as const };
+			// Don't yield until we have at least some content or label
+			if (!streamContent.trim() && !thinkingContent.trim() && !reasoningContent.trim()) {
+				yield hasSeenReasoning ? '> **Reasoning**' : '> **Thinking**';
+				continue;
+			}
+
+			const snapshot = await formatTelegramMessage(
+				streamContent + (streamContent ? '...' : ''),
+				thinkingContent + (thinkingContent && !streamContent ? '...' : ''),
+				reasoningContent + (reasoningContent && !streamContent ? '...' : ''),
+				false
+			);
 			
 			yield snapshot.text;
 		}
