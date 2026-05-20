@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_flags = [ "nodejs_compat" ]
 compatibility_date = "2025-06-04"
 
+[vars]
+ENVIRONMENT = "production"
+
 [ai]
 binding = "AI"
 
@@ -38,6 +41,9 @@ class_name = "BotWorkflow"
 [env.dev]
 name = "tux-robot-dev"
 
+[env.dev.vars]
+ENVIRONMENT = "dev"
+
 [env.dev.ai]
 binding = "AI"
 
@@ -68,6 +74,9 @@ name = "Sandbox"
 
 [env.production]
 name = "tux-robot"
+
+[env.production.vars]
+ENVIRONMENT = "production"
 
 [env.production.ai]
 binding = "AI"

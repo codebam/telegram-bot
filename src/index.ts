@@ -427,25 +427,25 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	const commands = new CommandGroup<MyContext>();
 
 	commands.command('start', 'Welcome message and command list', async (ctx) => {
-		await ctx.reply(
-			'Welcome! Here are my commands:\n' +
-				'/balance - Check your current Star balance\n' +
-				'/load <amount> - Top up your balance with Telegram Stars\n' +
-				'/photo <prompt> - Generate an image (100 Stars)\n' +
-				'/model <name> - Switch AI model and see costs\n' +
-				'/prompt ["prompt"] - Set your custom system prompt (no args to view, "" or reset to clear)\n' +
-				'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
-				'<prompt> - Generate text (may use tools if supported by model)\n' +
-				'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
-				'/clear - Clear your conversation history\n\n' +
-				'New users start with 200 free credits!\n\n' +
-				'Click the button below to open the Web App!',
-			{
-				reply_markup: {
-					inline_keyboard: [[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }]],
-				},
+		const isDev = ctx.env.ENVIRONMENT === 'dev';
+		const message = 'Welcome! Here are my commands:\n' +
+			'/balance - Check your current Star balance\n' +
+			'/load <amount> - Top up your balance with Telegram Stars\n' +
+			'/photo <prompt> - Generate an image (100 Stars)\n' +
+			'/model <name> - Switch AI model and see costs\n' +
+			'/prompt ["prompt"] - Set your custom system prompt (no args to view, "" or reset to clear)\n' +
+			'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
+			'<prompt> - Generate text (may use tools if supported by model)\n' +
+			'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
+			'/clear - Clear your conversation history\n\n' +
+			'New users start with 200 free credits!' +
+			(isDev ? '' : '\n\nClick the button below to open the Web App!');
+
+		await ctx.reply(message, {
+			reply_markup: isDev ? undefined : {
+				inline_keyboard: [[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }]],
 			},
-		);
+		});
 	});
 
 	commands.command('balance', 'Check your current Star balance', async (ctx) => {
@@ -735,26 +735,28 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 
 		if (prompt.includes('/start') && guestMessage.guest_query_id) {
 			try {
+				const isDev = ctx.env.ENVIRONMENT === 'dev';
+				const messageText = 'Welcome! Here are my commands:\n' +
+					'/balance - Check your current Star balance\n' +
+					'/load <amount> - Top up your balance with Telegram Stars\n' +
+					'/photo <prompt> - Generate an image (100 Stars)\n' +
+					'/model <name> - Switch AI model and see costs\n' +
+					'/prompt ["prompt"] - Set your custom system prompt (no args to view, "" or reset to clear)\n' +
+					'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
+					'<prompt> - Generate text (may use tools if supported by model)\n' +
+					'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
+					'/clear - Clear your conversation history\n\n' +
+					'New users start with 200 free credits!' +
+					(isDev ? '' : '\n\nClick the button below to open the Web App!');
+
 				await ctx.api.answerGuestQuery(guestMessage.guest_query_id, {
 					type: 'article',
 					id: crypto.randomUUID(),
 					title: 'Welcome',
 					input_message_content: {
-						message_text:
-							'Welcome! Here are my commands:\n' +
-							'/balance - Check your current Star balance\n' +
-							'/load <amount> - Top up your balance with Telegram Stars\n' +
-							'/photo <prompt> - Generate an image (100 Stars)\n' +
-							'/model <name> - Switch AI model and see costs\n' +
-							'/prompt ["prompt"] - Set your custom system prompt (no args to view, "" or reset to clear)\n' +
-							'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
-							'<prompt> - Generate text (may use tools if supported by model)\n' +
-							'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
-							'/clear - Clear your conversation history\n\n' +
-							'New users start with 200 free credits!\n\n' +
-							'Click the button below to open the Web App!',
+						message_text: messageText,
 					},
-					reply_markup: {
+					reply_markup: isDev ? undefined : {
 						inline_keyboard: [
 							[{ text: 'Open Web App', url: 'https://tux-robot.codebam.ca' }],
 						],
