@@ -751,9 +751,9 @@ export async function* getTelegramStream(
 			}
 
 			const snapshot = await formatTelegramMessage(
-				streamContent + (streamContent ? '...' : ''),
-				thinkingContent + (thinkingContent && !streamContent ? '...' : ''),
-				reasoningContent + (reasoningContent && !streamContent ? '...' : ''),
+				streamContent,
+				thinkingContent,
+				reasoningContent,
 				false
 			);
 			
