@@ -632,11 +632,13 @@ async function formatTelegramMessage(
 	let message = '';
 	if (thinking && thinking.trim()) {
 		const thinkingFormatted = isFinal ? await markdownToMarkdownV2(thinking.trim()) : thinking.trim();
-		message += thinkingFormatted.replace(/\n\n$/, '\n').split('\n').map(line => `> ${line}`).join('\n') + '\n\n';
+		// Ensure 'Thinking' is on its own line within the blockquote
+		message += `> **Thinking**\n> ${thinkingFormatted.replace(/\n/g, '\n> ')}\n\n`;
 	}
 	if (reasoning && reasoning.trim()) {
 		const reasoningFormatted = isFinal ? await markdownToMarkdownV2(reasoning.trim()) : reasoning.trim();
-		message += reasoningFormatted.split('\n').map(line => `> ${line}`).join('\n') + '\n\n';
+		// Ensure 'Reasoning' is on its own line within the blockquote
+		message += `> **Reasoning**\n> ${reasoningFormatted.replace(/\n/g, '\n> ')}\n\n`;
 	}
 
 	if (isFinal) {
