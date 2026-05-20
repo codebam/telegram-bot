@@ -963,9 +963,18 @@ export default {
 
 		if (url.hostname === 'workflow.local' || url.pathname === '/workflow' || xSource === 'webapp') {
 			console.log('[Fetch] Matches task endpoint, parsing body...');
-			const task = (await request.json()) as Task;
+			const rawBody = await request.text();
+			console.log(`[Fetch-RawBody] ${rawBody}`);
+			let task: Task;
+			try {
+				task = JSON.parse(rawBody) as Task;
+			} catch (e) {
+				console.error(`[Fetch-Auth] Failed to parse JSON body`, e);
+				return new Response('Unauthorized: Invalid JSON', { status: 401 });
+			}
 			
 			const authProof = xTelegramAuth || task.authProof;
+			console.log(`[Fetch-Auth] authProof length: ${authProof?.length || 0}`);
 			
 			if (!authProof) {
 				console.log(`[Fetch-Auth] Unauthorized: Missing Telegram auth proof`);
