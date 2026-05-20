@@ -956,24 +956,22 @@ export default {
 		}
 
 		if (url.hostname === 'workflow.local' || url.pathname === '/workflow' || xSource === 'webapp') {
+			if (!xTelegramAuth) {
+				return new Response('Unauthorized: Missing Telegram auth proof', { status: 401 });
+			}
+			
+			const isInitDataValid = await verifyTelegramWebAppData(xTelegramAuth, env.SECRET_TELEGRAM_API_TOKEN);
+			const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(xTelegramAuth, env.SECRET_TELEGRAM_API_TOKEN);
+			
+			if (!isInitDataValid && !isLoginDataValid) {
+				return new Response('Unauthorized: Invalid Telegram auth proof', { status: 401 });
+			}
+			
 			let task: Task;
 			try {
 				task = await request.json() as Task;
 			} catch (e) {
 				return new Response('Unauthorized: Invalid JSON', { status: 401 });
-			}
-			
-			const authProof = xTelegramAuth || task.authProof;
-			
-			if (!authProof) {
-				return new Response('Unauthorized: Missing Telegram auth proof', { status: 401 });
-			}
-			
-			const isInitDataValid = await verifyTelegramWebAppData(authProof, env.SECRET_TELEGRAM_API_TOKEN);
-			const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(authProof, env.SECRET_TELEGRAM_API_TOKEN);
-			
-			if (!isInitDataValid && !isLoginDataValid) {
-				return new Response('Unauthorized: Invalid Telegram auth proof', { status: 401 });
 			}
 			
 			console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
