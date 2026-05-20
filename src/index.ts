@@ -433,8 +433,8 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 				'/load <amount> - Top up your balance with Telegram Stars\n' +
 				'/photo <prompt> - Generate an image (100 Stars)\n' +
 				'/model <name> - Switch AI model and see costs\n' +
-				'/prompt <"prompt"> - Set your custom system prompt (use "" or reset to clear)\n' +
-				'/facts <"facts"> - Set facts about yourself for business mode (use "" or reset to clear)\n' +
+				'/prompt ["prompt"] - Set your custom system prompt (no args to view, "" or reset to clear)\n' +
+				'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
 				'<prompt> - Generate text (may use tools if supported by model)\n' +
 				'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
 				'/clear - Clear your conversation history\n\n' +
@@ -515,7 +515,14 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	commands.command('prompt', 'Set your custom system prompt', async (ctx) => {
 		let promptValue = ctx.match.trim();
 		const userId = String(ctx.from?.id);
-		if (promptValue === 'reset' || promptValue === '""' || promptValue === "''" || promptValue === '') {
+
+		if (promptValue === '') {
+			const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${userId}`);
+			await ctx.reply(`Current system prompt:\n\n${customPrompt || SYSTEM_PROMPTS.TUX_ROBOT}`);
+			return;
+		}
+
+		if (promptValue === 'reset' || promptValue === '""' || promptValue === "''") {
 			await ctx.env.CONVERSATION_HISTORY.delete(`prompt:${userId}`);
 			await ctx.reply(`System prompt reset to default:\n\n${SYSTEM_PROMPTS.TUX_ROBOT}`);
 		} else {
@@ -535,7 +542,13 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		const userId = ctx.from?.id;
 		if (!userId) return;
 
-		if (factsValue === 'reset' || factsValue === '""' || factsValue === "''" || factsValue === '') {
+		if (factsValue === '') {
+			const facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(userId)}`);
+			await ctx.reply(`Current business facts:\n\n${facts || 'No facts set.'}`);
+			return;
+		}
+
+		if (factsValue === 'reset' || factsValue === '""' || factsValue === "''") {
 			await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${String(userId)}`);
 			const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${userId}`);
 			if (connectionId) {
@@ -733,8 +746,8 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 							'/load <amount> - Top up your balance with Telegram Stars\n' +
 							'/photo <prompt> - Generate an image (100 Stars)\n' +
 							'/model <name> - Switch AI model and see costs\n' +
-							'/prompt <"prompt"> - Set your custom system prompt (use "" or reset to clear)\n' +
-							'/facts <"facts"> - Set facts about yourself for business mode (use "" or reset to clear)\n' +
+							'/prompt ["prompt"] - Set your custom system prompt (no args to view, "" or reset to clear)\n' +
+							'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
 							'<prompt> - Generate text (may use tools if supported by model)\n' +
 							'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
 							'/clear - Clear your conversation history\n\n' +
