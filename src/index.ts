@@ -6,7 +6,7 @@ import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
-import { HistoryManager, getBalance, markdownToMarkdownV2, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, sha256, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
+import { HistoryManager, getBalance, markdownToMarkdownV2, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, verifyTelegramWebAppData, verifyTelegramLogin, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
@@ -936,14 +936,37 @@ export default {
 	async fetch(request: Request, env: Environment, executionCtx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const xSource = request.headers.get('x-source');
-		const xPassword = request.headers.get('x-password');
+		const xTelegramAuth = request.headers.get('x-telegram-auth');
 		console.log(`[Fetch] Incoming request: ${request.method} ${url.href} (hostname: ${url.hostname}, source: ${xSource})`);
 
-		if (url.hostname === 'workflow.local' || url.pathname === '/workflow' || xSource === 'webapp') {
-			const expectedPassword = await sha256(env.SECRET_TELEGRAM_API_TOKEN);
-			if (xPassword !== expectedPassword) {
-				return new Response('Unauthorized', { status: 401 });
+		if (url.pathname === '/verify') {
+			try {
+				const body = await request.json() as { authProof?: string };
+				if (body.authProof) {
+					const isInitDataValid = await verifyTelegramWebAppData(body.authProof, env.SECRET_TELEGRAM_API_TOKEN);
+					const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(body.authProof, env.SECRET_TELEGRAM_API_TOKEN);
+					if (isInitDataValid || isLoginDataValid) {
+						return new Response(JSON.stringify({ valid: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+					}
+				}
+			} catch (e) {
+				return new Response(JSON.stringify({ valid: false }), { status: 401, headers: { 'Content-Type': 'application/json' } });
 			}
+			return new Response(JSON.stringify({ valid: false }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+		}
+
+		if (url.hostname === 'workflow.local' || url.pathname === '/workflow' || xSource === 'webapp') {
+			if (!xTelegramAuth) {
+				return new Response('Unauthorized: Missing Telegram auth proof', { status: 401 });
+			}
+			
+			const isInitDataValid = await verifyTelegramWebAppData(xTelegramAuth, env.SECRET_TELEGRAM_API_TOKEN);
+			const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(xTelegramAuth, env.SECRET_TELEGRAM_API_TOKEN);
+			
+			if (!isInitDataValid && !isLoginDataValid) {
+				return new Response('Unauthorized: Invalid Telegram auth proof', { status: 401 });
+			}
+			
 			console.log('[Fetch] Matches task endpoint, processing task...');
 			const task = (await request.json()) as Task;
 			console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
