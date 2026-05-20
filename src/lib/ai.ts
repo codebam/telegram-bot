@@ -631,8 +631,9 @@ async function formatTelegramMessage(
 ): Promise<{ text: string; parse_mode: 'MarkdownV2' }> {
 	const formatBlock = async (label: string, text?: string) => {
 		if (!text || !text.trim()) return '';
-		const formatted = isFinal ? await markdownToMarkdownV2(text.trim()) : sanitizeMarkdownV2(text.trim());
-		return `> *${label}*\n> ${formatted.split('\n').join('\n> ')}\n\n`;
+		// For drafts, we yield raw text optimistically. For final, we use the proper converter.
+		const body = isFinal ? await markdownToMarkdownV2(text.trim()) : text.trim();
+		return `> *${label}*\n> ${body.split('\n').join('\n> ')}\n\n`;
 	};
 
 	let message = '';
@@ -640,12 +641,7 @@ async function formatTelegramMessage(
 	message += await formatBlock('Reasoning', reasoning);
 
 	if (content && content.trim()) {
-		const formatted = isFinal ? await markdownToMarkdownV2(content.trim()) : sanitizeMarkdownV2(content.trim());
-		message += formatted;
-	}
-
-	if (!message.trim()) {
-		message = isFinal ? ' ' : '⏳';
+		message += isFinal ? await markdownToMarkdownV2(content.trim()) : content.trim();
 	}
 
 	return { text: message.trim().slice(0, 4095), parse_mode: 'MarkdownV2' };
@@ -656,6 +652,15 @@ async function formatTelegramMessage(
  * with escaped text if the initial formatted call fails due to invalid syntax.
  */
 function createOptimisticApi(raw: any): any {
+	const smartSanitize = (text: string) => {
+		return text.split('\n').map(line => {
+			if (line.startsWith('> ')) {
+				return '> ' + sanitizeMarkdownV2(line.slice(2));
+			}
+			return sanitizeMarkdownV2(line);
+		}).join('\n');
+	};
+
 	return new Proxy(raw, {
 		get(target, prop, receiver) {
 			if (prop === 'sendMessageDraft' || prop === 'sendMessage') {
@@ -663,16 +668,11 @@ function createOptimisticApi(raw: any): any {
 					try {
 						return await target[prop](data, signal);
 					} catch (e: any) {
-						// Catch MarkdownV2 parsing errors
 						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
-							// If the message is already heavily escaped or very long, just fail
-							if (data.text.includes('\\\\\\\\')) {
-								throw e;
-							}
-							console.warn(`[OptimisticApi] ${prop} failed, retrying with global escaped text. Error: ${e.description}`);
+							console.warn(`[OptimisticApi] ${prop} failed, retrying with smart escaped text. Error: ${e.description}`);
 							const escapedData = {
 								...data,
-								text: sanitizeMarkdownV2(data.text),
+								text: smartSanitize(data.text),
 								parse_mode: 'MarkdownV2',
 							};
 							return await target[prop](escapedData, signal);
@@ -747,7 +747,9 @@ export async function* getTelegramStream(
 				false
 			);
 			
-			yield snapshot.text;
+			if (snapshot.text.trim()) {
+				yield snapshot.text;
+			}
 		}
 	} catch (e) {
 		console.error(`[getTelegramStream] Loop Error:`, e);
