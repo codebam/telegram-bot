@@ -944,31 +944,42 @@ export default {
 				const body = await request.json() as { authProof?: string };
 				if (body.authProof) {
 					const isInitDataValid = await verifyTelegramWebAppData(body.authProof, env.SECRET_TELEGRAM_API_TOKEN);
+					console.log(`[/verify] isInitDataValid: ${isInitDataValid}`);
 					const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(body.authProof, env.SECRET_TELEGRAM_API_TOKEN);
+					console.log(`[/verify] isLoginDataValid: ${isLoginDataValid}`);
 					if (isInitDataValid || isLoginDataValid) {
 						return new Response(JSON.stringify({ valid: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 					}
+				} else {
+					console.log(`[/verify] Missing authProof in body`);
 				}
 			} catch (e) {
+				console.error(`[/verify] Error parsing request body:`, e);
 				return new Response(JSON.stringify({ valid: false }), { status: 401, headers: { 'Content-Type': 'application/json' } });
 			}
+			console.log(`[/verify] Returning invalid`);
 			return new Response(JSON.stringify({ valid: false }), { status: 401, headers: { 'Content-Type': 'application/json' } });
 		}
 
 		if (url.hostname === 'workflow.local' || url.pathname === '/workflow' || xSource === 'webapp') {
-			if (!xTelegramAuth) {
+			console.log('[Fetch] Matches task endpoint, parsing body...');
+			const task = (await request.json()) as Task;
+			
+			const authProof = xTelegramAuth || task.authProof;
+			
+			if (!authProof) {
+				console.log(`[Fetch-Auth] Unauthorized: Missing Telegram auth proof`);
 				return new Response('Unauthorized: Missing Telegram auth proof', { status: 401 });
 			}
 			
-			const isInitDataValid = await verifyTelegramWebAppData(xTelegramAuth, env.SECRET_TELEGRAM_API_TOKEN);
-			const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(xTelegramAuth, env.SECRET_TELEGRAM_API_TOKEN);
+			const isInitDataValid = await verifyTelegramWebAppData(authProof, env.SECRET_TELEGRAM_API_TOKEN);
+			const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(authProof, env.SECRET_TELEGRAM_API_TOKEN);
 			
 			if (!isInitDataValid && !isLoginDataValid) {
+				console.log(`[Fetch-Auth] Unauthorized: Invalid Telegram auth proof.`);
 				return new Response('Unauthorized: Invalid Telegram auth proof', { status: 401 });
 			}
 			
-			console.log('[Fetch] Matches task endpoint, processing task...');
-			const task = (await request.json()) as Task;
 			console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
 
 			const userMessage: ChatMessage = { role: 'user', content: task.prompt };
