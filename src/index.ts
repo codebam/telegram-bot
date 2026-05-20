@@ -6,7 +6,7 @@ import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
-import { HistoryManager, getBalance, markdownToMarkdownV2, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
+import { HistoryManager, getBalance, markdownToMarkdownV2, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, sha256, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
@@ -940,7 +940,8 @@ export default {
 		console.log(`[Fetch] Incoming request: ${request.method} ${url.href} (hostname: ${url.hostname}, source: ${xSource})`);
 
 		if (url.hostname === 'workflow.local' || url.pathname === '/workflow' || xSource === 'webapp') {
-			if (xPassword !== env.SECRET_TELEGRAM_API_TOKEN) {
+			const expectedPassword = await sha256(env.SECRET_TELEGRAM_API_TOKEN);
+			if (xPassword !== expectedPassword) {
 				return new Response('Unauthorized', { status: 401 });
 			}
 			console.log('[Fetch] Matches task endpoint, processing task...');
