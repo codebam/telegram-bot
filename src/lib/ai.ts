@@ -629,22 +629,23 @@ async function formatTelegramMessage(
 	reasoning?: string,
 	isFinal = false
 ): Promise<{ text: string; parse_mode: 'MarkdownV2' }> {
+	const formatBlock = async (label: string, text?: string) => {
+		if (!text || !text.trim()) return '';
+		const formatted = isFinal ? await markdownToMarkdownV2(text.trim()) : sanitizeMarkdownV2(text.trim());
+		return `> *${label}*\n> ${formatted.split('\n').join('\n> ')}\n\n`;
+	};
+
 	let message = '';
-	if (thinking && thinking.trim()) {
-		const thinkingFormatted = isFinal ? await markdownToMarkdownV2(thinking.trim()) : thinking.trim();
-		// Ensure 'Thinking' is on its own line within the blockquote
-		message += `> **Thinking**\n> ${thinkingFormatted.replace(/\n/g, '\n> ')}\n\n`;
-	}
-	if (reasoning && reasoning.trim()) {
-		const reasoningFormatted = isFinal ? await markdownToMarkdownV2(reasoning.trim()) : reasoning.trim();
-		// Ensure 'Reasoning' is on its own line within the blockquote
-		message += `> **Reasoning**\n> ${reasoningFormatted.replace(/\n/g, '\n> ')}\n\n`;
+	message += await formatBlock('Thinking', thinking);
+	message += await formatBlock('Reasoning', reasoning);
+
+	if (content && content.trim()) {
+		const formatted = isFinal ? await markdownToMarkdownV2(content.trim()) : sanitizeMarkdownV2(content.trim());
+		message += formatted;
 	}
 
-	if (isFinal) {
-		message += await markdownToMarkdownV2(content);
-	} else {
-		message += content;
+	if (!message.trim()) {
+		message = isFinal ? ' ' : '⏳';
 	}
 
 	return { text: message.trim().slice(0, 4095), parse_mode: 'MarkdownV2' };
@@ -664,12 +665,11 @@ function createOptimisticApi(raw: any): any {
 					} catch (e: any) {
 						// Catch MarkdownV2 parsing errors
 						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
-							// If we already tried escaping or the message has existing escapes, don't double escape
-							if (data.text.includes('\\.') || data.text.includes('\\-') || data.text.includes('\\!')) {
-								console.warn(`[OptimisticApi] ${prop} failed and already looks escaped. Not retrying.`);
+							// If the message is already heavily escaped or very long, just fail
+							if (data.text.includes('\\\\\\\\')) {
 								throw e;
 							}
-							console.warn(`[OptimisticApi] ${prop} failed, retrying with escaped text. Error: ${e.description}`);
+							console.warn(`[OptimisticApi] ${prop} failed, retrying with global escaped text. Error: ${e.description}`);
 							const escapedData = {
 								...data,
 								text: sanitizeMarkdownV2(data.text),
@@ -726,28 +726,18 @@ export async function* getTelegramStream(
 	let streamContent = '';
 	let thinkingContent = '';
 	let reasoningContent = '';
-	let hasSeenReasoning = false;
 
 	const filter = createThinkFilter();
 
 	try {
-		for await (const chunk of getAiStream(ai, modelId, messages, tools, (status: 'Thinking' | 'Reasoning') => {
-			if (status === 'Reasoning') hasSeenReasoning = true;
-		})) {
+		for await (const chunk of getAiStream(ai, modelId, messages, tools, () => {})) {
 			if (chunk.type === 'thinking') {
 				thinkingContent += chunk.text;
 			} else if (chunk.type === 'reasoning') {
 				reasoningContent += chunk.text;
-				hasSeenReasoning = true;
 			} else if (chunk.type === 'content') {
 				const filtered = filter.push(chunk.text);
 				if (filtered) streamContent += filtered;
-			}
-
-			// Don't yield until we have at least some content or label
-			if (!streamContent.trim() && !thinkingContent.trim() && !reasoningContent.trim()) {
-				yield hasSeenReasoning ? '> **Reasoning**' : '> **Thinking**';
-				continue;
 			}
 
 			const snapshot = await formatTelegramMessage(
@@ -771,7 +761,7 @@ export async function* getTelegramStream(
 		streamContent = streamContent.slice(0, TEXT_LIMIT) + '\n\n[Truncated due to Telegram length limit]';
 	}
 
-	if (streamContent.trim() || reasoningContent.trim() || thinkingContent.trim()) {
+	if (streamContent.trim() || thinkingContent.trim() || reasoningContent.trim()) {
 		const final = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent, true);
 		yield final.text;
 	}
