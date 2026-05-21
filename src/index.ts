@@ -6,7 +6,7 @@ import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
-import { HistoryManager, getBalance, markdownToMarkdownV2, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, verifyTelegramWebAppData, verifyTelegramLogin, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
+import { HistoryManager, getBalance, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, verifyTelegramWebAppData, verifyTelegramLogin, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
@@ -93,6 +93,11 @@ async function chargeStars(
 				billingUserId = ownerData.id;
 			}
 		}
+	}
+
+	if (ctx.update.guest_message) {
+		userId = userId || ctx.update.guest_message.from?.id;
+		billingUserId = billingUserId || ctx.update.guest_message.from?.id;
 	}
 
 	if (!userId || userId === ctx.me.id) {
@@ -212,13 +217,13 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 			}
 		}
 
-		// Initialize history from KV if it exists, otherwise start fresh
-		const history = (await conversation.external(async () => {
-			const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
-			return await historyManager.getHistory(userId, threadId);
-		})) || [];
-
 		while (true) {
+			// Initialize history from KV if it exists, otherwise start fresh
+			const history = (await conversation.external(async () => {
+				const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
+				return await historyManager.getHistory(userId, threadId);
+			})) || [];
+
 			let prompt = ctx.msg?.text || ctx.msg?.caption || '';
 
 			const geminiParts: GeminiPart[] = [];
@@ -513,7 +518,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	commands.command('prompt', 'Set your custom system prompt', async (ctx) => {
-		let promptValue = ctx.match.trim();
+		let promptValue = (ctx.match || '').trim();
 		const userId = String(ctx.from?.id);
 
 		if (promptValue === '') {
@@ -538,7 +543,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	commands.command('facts', 'Set facts about yourself for business mode', async (ctx) => {
-		let factsValue = ctx.match.trim();
+		let factsValue = (ctx.match || '').trim();
 		const userId = ctx.from?.id;
 		if (!userId) return;
 
@@ -640,49 +645,6 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		await chargeStars(ctx, { type: 'voice', prompt: '', fileId });
 	});
 
-	bot.on('inline_query', async (ctx) => {
-		const query = ctx.inlineQuery.query;
-		if (!query.endsWith('.') && !query.endsWith('?')) {
-			await ctx.answerInlineQuery([
-				{
-					type: 'article',
-					id: 'complete_sentence',
-					title: 'Please complete your sentence',
-					input_message_content: {
-						message_text: 'End your sentence with a period (.) or question mark (?) to get an AI response',
-						parse_mode: 'MarkdownV2',
-					},
-				},
-			]);
-			return;
-		}
-		const messages = [
-			{ role: 'system', content: SYSTEM_PROMPTS.TUX_ROBOT },
-			{ role: 'user', content: query },
-		];
-		try {
-			const rawResponse = await ctx.env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
-				messages,
-				max_completion_tokens: 100,
-			});
-			const aiResponse = rawResponse as { response?: string };
-			if (aiResponse.response) {
-				await ctx.answerInlineQuery([
-					{
-						type: 'article',
-						id: 'ai_response',
-						title: 'AI Response',
-						input_message_content: {
-							message_text: await markdownToMarkdownV2(aiResponse.response),
-							parse_mode: 'MarkdownV2',
-						},
-					},
-				]);
-			}
-		} catch {
-			/* ignore */
-		}
-	});
 
 	bot.on('business_connection', async (ctx) => {
 		const connection = ctx.businessConnection;
@@ -1081,7 +1043,6 @@ export default {
 							'message',
 							'edited_message',
 							'callback_query',
-							'inline_query',
 							'guest_message',
 							'business_message',
 							'business_connection',
