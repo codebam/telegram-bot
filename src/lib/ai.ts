@@ -623,25 +623,22 @@ export interface StreamCtx {
 	replyWithStream?: StreamContextExtension['replyWithStream'];
 }
 
-async function formatTelegramMessage(
+function formatTelegramMessage(
 	content: string,
 	thinking?: string,
-	reasoning?: string,
-	isFinal = false
-): Promise<{ text: string; parse_mode: 'MarkdownV2' }> {
-	const formatBlock = async (label: string, text?: string) => {
+	reasoning?: string
+): { text: string; parse_mode: 'MarkdownV2' } {
+	const formatBlock = (label: string, text?: string) => {
 		if (!text || !text.trim()) return '';
-		// For drafts, we yield raw text optimistically. For final, we use the proper converter.
-		const body = isFinal ? await markdownToMarkdownV2(text.trim()) : text.trim();
-		return `> *${label}*\n> ${body.split('\n').join('\n> ')}\n\n`;
+		return `> *${label}*\n> ${text.trim().split('\n').join('\n> ')}\n\n`;
 	};
 
 	let message = '';
-	message += await formatBlock('Thinking', thinking);
-	message += await formatBlock('Reasoning', reasoning);
+	message += formatBlock('Thinking', thinking);
+	message += formatBlock('Reasoning', reasoning);
 
 	if (content && content.trim()) {
-		message += isFinal ? await markdownToMarkdownV2(content.trim()) : content.trim();
+		message += content.trim();
 	}
 
 	return { text: message.trim().slice(0, 4095), parse_mode: 'MarkdownV2' };
@@ -666,9 +663,13 @@ function createOptimisticApi(raw: any): any {
 			if (prop === 'sendMessageDraft' || prop === 'sendMessage') {
 				return async (data: any, signal?: AbortSignal) => {
 					try {
+						let text = data.text;
+						if (prop === 'sendMessage' && text) {
+							text = await markdownToMarkdownV2(text);
+						}
 						const repairedData = {
 							...data,
-							text: data.text ? repairMarkdownV2(data.text) : data.text,
+							text: text ? repairMarkdownV2(text) : text,
 						};
 						return await target[prop](repairedData, signal);
 					} catch (e: any) {
@@ -689,10 +690,10 @@ function createOptimisticApi(raw: any): any {
 				return async (data: any, signal?: AbortSignal) => {
 					try {
 						const repairedData = { ...data };
-						if (repairedData?.result?.input_message_content) {
-							repairedData.result.input_message_content.message_text = repairMarkdownV2(
-								repairedData.result.input_message_content.message_text
-							);
+						if (repairedData?.result?.input_message_content?.message_text) {
+							let text = repairedData.result.input_message_content.message_text;
+							text = await markdownToMarkdownV2(text);
+							repairedData.result.input_message_content.message_text = repairMarkdownV2(text);
 						}
 						return await target[prop](repairedData, signal);
 					} catch (e: any) {
@@ -857,6 +858,7 @@ async function* adaptiveThrottled(generator: AsyncGenerator<string>): AsyncGener
 	let lastYieldTime = 0;
 	let lastValue: string | undefined;
 	let pendingValue: string | undefined;
+	let yieldedLastValue = false;
 
 	for await (const value of generator) {
 		lastValue = value;
@@ -877,14 +879,16 @@ async function* adaptiveThrottled(generator: AsyncGenerator<string>): AsyncGener
 			yield value;
 			lastYieldTime = now;
 			pendingValue = undefined;
+			yieldedLastValue = true;
 		} else {
 			pendingValue = value;
+			yieldedLastValue = false;
 		}
 	}
 
 	if (pendingValue !== undefined) {
 		yield pendingValue;
-	} else if (lastValue !== undefined) {
+	} else if (lastValue !== undefined && !yieldedLastValue) {
 		yield lastValue;
 	}
 }
@@ -915,11 +919,10 @@ export async function* getTelegramStream(
 				if (filtered) streamContent += filtered;
 			}
 
-			const snapshot = await formatTelegramMessage(
+			const snapshot = formatTelegramMessage(
 				streamContent,
 				thinkingContent,
-				reasoningContent,
-				false
+				reasoningContent
 			);
 			
 			if (snapshot.text.trim()) {
@@ -939,7 +942,7 @@ export async function* getTelegramStream(
 	}
 
 	if (streamContent.trim() || thinkingContent.trim() || reasoningContent.trim()) {
-		const final = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent, true);
+		const final = formatTelegramMessage(streamContent, thinkingContent, reasoningContent);
 		yield final.text;
 	}
 }
