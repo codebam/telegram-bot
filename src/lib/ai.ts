@@ -255,10 +255,10 @@ export async function customRunWithTools(
 
 	let turn = 0;
 	while (turn < 5) {
-		const isFinalTurn = turn > 0 || cfTools.length === 0;
+		const isFinalTurn = turn >= 4 || cfTools.length === 0;
 		const shouldStream = isFinalTurn ? config.streamFinalResponse : false;
 		console.log(`[customRunWithTools] Turn:${turn} ShouldStream:${shouldStream} FinalTurn:${isFinalTurn}`);
-		const response = await runModel(messages, shouldStream, turn > 0);
+		const response = await runModel(messages, shouldStream, turn >= 4);
 
 		if (shouldStream || (response && typeof (response as any).getReader === 'function')) {
 			return response as ReadableStream;
