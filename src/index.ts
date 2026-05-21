@@ -7,7 +7,7 @@ import { conversations, createConversation, type Conversation, type Conversation
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
 import { HistoryManager, getBalance, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, verifyTelegramWebAppData, verifyTelegramLogin, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
-import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool } from './lib/utils.js';
+import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool, createCodeWorkspaceTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
@@ -853,6 +853,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 				createSandboxTool(env.Sandbox, String(task.userId)),
 				createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, modelId),
 				createTelegramFileSearchTool(env, modelId),
+				createCodeWorkspaceTool(env, env.Sandbox, String(task.userId), botInstance.api, task),
 			],
 		);
 
@@ -862,6 +863,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 		}
 	} catch (e) {
 		console.error('[processTask] Error processing task:', e);
+		throw e;
 	}
 }
 
@@ -877,7 +879,14 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 			task.type === 'voice' ||
 			task.type === 'gen_photo'
 		) {
-			await step.do('process task', async () => {
+			await step.do('process task', {
+				retries: {
+					limit: 3,
+					delay: '2 seconds',
+					backoff: 'exponential',
+				},
+				timeout: '5 minutes',
+			}, async () => {
 				await processTask(task, this.env);
 			});
 		}
@@ -972,6 +981,7 @@ export default {
 				createSandboxTool(env.Sandbox, String(task.userId)),
 				createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
 				createTelegramFileSearchTool(env, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
+				createCodeWorkspaceTool(env, env.Sandbox, String(task.userId), new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN).api, task),
 			];
 
 			const aiResponse = await customRunWithTools(

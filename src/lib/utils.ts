@@ -155,3 +155,141 @@ export const createSandboxTool = (sandboxBinding: DurableObjectNamespace<Sandbox
 		}
 	},
 });
+
+import type { Api } from 'grammy';
+import { InputFile } from 'grammy';
+import type { Environment, Task } from '@codebam/shared';
+
+export const createCodeWorkspaceTool = (
+	env: Environment,
+	sandboxBinding: DurableObjectNamespace<Sandbox>,
+	userId: string,
+	api: Api,
+	task: Task
+) => {
+	return {
+		name: 'code_workspace',
+		description: 'Write, modify, or generate code files in the workspace, run scripts, execute tests/verifications, and optionally return files back to the user.',
+		parameters: {
+			type: 'object',
+			properties: {
+				files: {
+					type: 'array',
+					description: 'List of files to write or modify in the workspace.',
+					items: {
+						type: 'object',
+						properties: {
+							path: { type: 'string', description: 'Absolute path of the file (e.g. /workspace/solution.py)' },
+							content: { type: 'string', description: 'Content to write to the file' },
+						},
+						required: ['path', 'content'],
+					},
+				},
+				command: {
+					type: 'string',
+					description: 'Optional shell command or script to execute in the container (e.g. "pytest", "python solution.py") for verification or generation.'
+				},
+				output_file: {
+					type: 'string',
+					description: 'Optional path of a file in the workspace to retrieve and return directly to the user (e.g. /workspace/solution.py).'
+				}
+			},
+			required: ['files']
+		},
+		function: async ({ files, command, output_file }: { files: Array<{ path: string; content: string }>; command?: string; output_file?: string }) => {
+			try {
+				const sandbox = getSandbox(sandboxBinding, userId);
+				
+				// 1. Write the files
+				const writeResults = [];
+				for (const file of files) {
+					console.log(`[CodeWorkspace] Writing file to path: ${file.path}`);
+					await sandbox.writeFile(file.path, file.content);
+					writeResults.push(`Wrote ${file.path} (${file.content.length} chars)`);
+				}
+
+				// 2. Execute verification command if provided
+				let executionLog = '';
+				if (command) {
+					console.log(`[CodeWorkspace] Executing command: ${command}`);
+					// We execute it by wrapping it in python subprocess to capture full stdout/stderr
+					const wrapperCode = `
+import subprocess
+import sys
+
+cmd = """${command.replace(/"""/g, '\\"\\"\\"')}"""
+print(f"Executing: {cmd}", flush=True)
+try:
+    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+    print("--- STDOUT ---")
+    print(res.stdout)
+    print("--- STDERR ---")
+    print(res.stderr)
+    print(f"Exit Code: {res.returncode}")
+    sys.exit(res.returncode)
+except Exception as e:
+    print(f"Error executing command: {e}")
+    sys.exit(1)
+`.trim();
+
+					const result = await sandbox.runCode(wrapperCode, { language: 'python' });
+					const stdout = result.logs.stdout.join('');
+					const stderr = result.logs.stderr.join('');
+					executionLog = `\nStdout: ${stdout}\nStderr: ${stderr}`;
+					if (result.error) {
+						executionLog += `\nError: ${result.error.name} - ${result.error.message}`;
+					}
+
+					// Update active sandbox logs inside Cloudflare KV for Svelte webapp Dashboard
+					const logsPayload = {
+						stdout,
+						stderr,
+						error: result.error ? { name: result.error.name, message: result.error.message } : undefined,
+						timestamp: new Date().toISOString(),
+						command,
+					};
+					await env.CONVERSATION_HISTORY.put(`sandbox_logs:${userId}`, JSON.stringify(logsPayload));
+				}
+
+				// 3. Retrieve output file and send to user via Telegram
+				let fileSentMsg = '';
+				if (output_file) {
+					console.log(`[CodeWorkspace] Reading output file: ${output_file}`);
+					const readRes = await sandbox.readFile(output_file, { encoding: 'base64' });
+					const contentBase64 = readRes.content;
+					const fileName = output_file.split('/').pop() || 'file';
+
+					if (contentBase64) {
+						const binaryString = atob(contentBase64 as string);
+						const bytes = new Uint8Array(binaryString.length);
+						for (let i = 0; i < binaryString.length; i++) {
+							bytes[i] = binaryString.charCodeAt(i);
+						}
+
+						console.log(`[CodeWorkspace] Sending document ${fileName} back to user...`);
+						await api.sendDocument(Number(task.chatId), new InputFile(bytes, fileName), {
+							message_thread_id: task.threadId,
+							business_connection_id: task.businessConnectionId,
+							caption: `Here is the requested file: \`${fileName}\``,
+							parse_mode: 'MarkdownV2',
+							reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+						});
+						fileSentMsg = `\nRetrieved and sent ${output_file} back to user via Telegram.`;
+					}
+				}
+
+				return JSON.stringify({
+					success: true,
+					files: writeResults,
+					execution: executionLog,
+					fileSent: fileSentMsg
+				});
+
+			} catch (e: any) {
+				console.error(`[CodeWorkspace] Error in tool execution:`, e);
+				return `Error executing workspace task: ${String(e)}`;
+			}
+		}
+	};
+};
+

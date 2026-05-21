@@ -687,17 +687,163 @@ function createOptimisticApi(raw: any): any {
 }
 
 /**
- * Throttles an async generator to yield at most once every `ms` milliseconds.
- * Ensures the final value is always yielded.
+ * Pre-emptively scans MarkdownV2 text to detect and auto-close unclosed syntax blocks
+ * split across streaming chunks, preventing syntax errors in the Telegram parser.
  */
-async function* throttled<T>(generator: AsyncGenerator<T>, ms: number): AsyncGenerator<T> {
+export function repairMarkdownV2(text: string): string {
+	const stack: string[] = [];
+	let i = 0;
+	let backslashCount = 0;
+
+	while (i < text.length) {
+		const char = text[i];
+
+		if (char === '\\') {
+			backslashCount++;
+			i++;
+			continue;
+		}
+
+		const isEscaped = backslashCount % 2 === 1;
+		backslashCount = 0;
+
+		if (isEscaped) {
+			i++;
+			continue;
+		}
+
+		// If inside a code block, only watch for code block closing
+		if (stack[stack.length - 1] === 'codeblock') {
+			if (text.startsWith('```', i)) {
+				stack.pop();
+				i += 3;
+			} else {
+				i++;
+			}
+			continue;
+		}
+
+		// If inside inline code, only watch for inline code closing
+		if (stack[stack.length - 1] === 'inlinecode') {
+			if (char === '`') {
+				stack.pop();
+				i++;
+			} else {
+				i++;
+			}
+			continue;
+		}
+
+		// Standard tokens
+		if (text.startsWith('```', i)) {
+			stack.push('codeblock');
+			i += 3;
+		} else if (char === '`') {
+			stack.push('inlinecode');
+			i++;
+		} else if (text.startsWith('||', i)) {
+			if (stack[stack.length - 1] === 'spoiler') {
+				stack.pop();
+			} else {
+				stack.push('spoiler');
+			}
+			i += 2;
+		} else if (text.startsWith('__', i)) {
+			if (stack[stack.length - 1] === 'underline') {
+				stack.pop();
+			} else {
+				stack.push('underline');
+			}
+			i += 2;
+		} else if (char === '_') {
+			if (stack[stack.length - 1] === 'italic') {
+				stack.pop();
+			} else {
+				stack.push('italic');
+			}
+			i++;
+		} else if (char === '*') {
+			if (stack[stack.length - 1] === 'bold') {
+				stack.pop();
+			} else {
+				stack.push('bold');
+			}
+			i++;
+		} else if (char === '~') {
+			if (stack[stack.length - 1] === 'strikethrough') {
+				stack.pop();
+			} else {
+				stack.push('strikethrough');
+			}
+			i++;
+		} else if (char === '[') {
+			stack.push('link_text');
+			i++;
+		} else if (char === ']') {
+			if (stack[stack.length - 1] === 'link_text') {
+				stack.pop();
+				// Check if followed by ( for URL
+				if (text[i + 1] === '(') {
+					stack.push('link_url');
+					i += 2;
+				} else {
+					i++;
+				}
+			} else {
+				i++;
+			}
+		} else if (char === ')') {
+			if (stack[stack.length - 1] === 'link_url') {
+				stack.pop();
+			}
+			i++;
+		} else {
+			i++;
+		}
+	}
+
+	// Now append closures in reverse order
+	let suffix = '';
+	for (let j = stack.length - 1; j >= 0; j--) {
+		const state = stack[j];
+		if (state === 'codeblock') suffix += '\n```';
+		else if (state === 'inlinecode') suffix += '`';
+		else if (state === 'spoiler') suffix += '||';
+		else if (state === 'underline') suffix += '__';
+		else if (state === 'italic') suffix += '_';
+		else if (state === 'bold') suffix += '*';
+		else if (state === 'strikethrough') suffix += '~';
+		else if (state === 'link_text') suffix += ']';
+		else if (state === 'link_url') suffix += ')';
+	}
+
+	return text + suffix;
+}
+
+/**
+ * Throttles an async generator of strings dynamically.
+ * Starts fast (400-500ms) for low TTFT, decaying to 3.5 seconds as message length grows.
+ */
+async function* adaptiveThrottled(generator: AsyncGenerator<string>): AsyncGenerator<string> {
 	let lastYieldTime = 0;
-	let lastValue: T | undefined;
-	let pendingValue: T | undefined;
+	let lastValue: string | undefined;
+	let pendingValue: string | undefined;
 
 	for await (const value of generator) {
 		lastValue = value;
 		const now = Date.now();
+		const len = value.length;
+
+		// Adaptive delay decaying from 400ms to 3500ms
+		const minDelay = 400;
+		const maxDelay = 3500;
+		const scaleLength = 1500;
+		let ms = minDelay;
+		if (len > 100) {
+			const ratio = Math.min(1, (len - 100) / scaleLength);
+			ms = minDelay + ratio * (maxDelay - minDelay);
+		}
+
 		if (now - lastYieldTime >= ms) {
 			yield value;
 			lastYieldTime = now;
@@ -748,7 +894,7 @@ export async function* getTelegramStream(
 			);
 			
 			if (snapshot.text.trim()) {
-				yield snapshot.text;
+				yield repairMarkdownV2(snapshot.text);
 			}
 		}
 	} catch (e) {
@@ -765,7 +911,7 @@ export async function* getTelegramStream(
 
 	if (streamContent.trim() || thinkingContent.trim() || reasoningContent.trim()) {
 		const final = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent, true);
-		yield final.text;
+		yield repairMarkdownV2(final.text);
 	}
 }
 
@@ -788,8 +934,8 @@ export async function streamAiResponseToTelegram(
 	console.log(`[streamAiResponseToTelegram] Starting for task: ${task.type}, updateType: ${task.updateType}, model: ${modelId}`);
 
 	const rawStream = getTelegramStream(ai, modelId, messages, tools);
-	// Throttle to 5 seconds to match stable manual behavior and prevent flooding
-	const stream = throttled(rawStream, 5000);
+	// Adaptive throttle instead of hard 5-second pause
+	const stream = adaptiveThrottled(rawStream);
 	
 	let lastContent = '';
 	const wrappedStream = (async function* () {
