@@ -666,7 +666,11 @@ function createOptimisticApi(raw: any): any {
 			if (prop === 'sendMessageDraft' || prop === 'sendMessage') {
 				return async (data: any, signal?: AbortSignal) => {
 					try {
-						return await target[prop](data, signal);
+						const repairedData = {
+							...data,
+							text: data.text ? repairMarkdownV2(data.text) : data.text,
+						};
+						return await target[prop](repairedData, signal);
 					} catch (e: any) {
 						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
 							console.warn(`[OptimisticApi] ${prop} failed, retrying with smart escaped text. Error: ${e.description}`);
@@ -675,6 +679,31 @@ function createOptimisticApi(raw: any): any {
 								text: smartSanitize(data.text),
 								parse_mode: 'MarkdownV2',
 							};
+							return await target[prop](escapedData, signal);
+						}
+						throw e;
+					}
+				};
+			}
+			if (prop === 'answerGuestQuery') {
+				return async (data: any, signal?: AbortSignal) => {
+					try {
+						const repairedData = { ...data };
+						if (repairedData?.result?.input_message_content) {
+							repairedData.result.input_message_content.message_text = repairMarkdownV2(
+								repairedData.result.input_message_content.message_text
+							);
+						}
+						return await target[prop](repairedData, signal);
+					} catch (e: any) {
+						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
+							console.warn(`[OptimisticApi] ${prop} failed, retrying with smart escaped text. Error: ${e.description}`);
+							const escapedData = { ...data };
+							if (escapedData?.result?.input_message_content) {
+								escapedData.result.input_message_content.message_text = smartSanitize(
+									escapedData.result.input_message_content.message_text
+								);
+							}
 							return await target[prop](escapedData, signal);
 						}
 						throw e;
@@ -894,7 +923,7 @@ export async function* getTelegramStream(
 			);
 			
 			if (snapshot.text.trim()) {
-				yield repairMarkdownV2(snapshot.text);
+				yield snapshot.text;
 			}
 		}
 	} catch (e) {
@@ -911,7 +940,27 @@ export async function* getTelegramStream(
 
 	if (streamContent.trim() || thinkingContent.trim() || reasoningContent.trim()) {
 		const final = await formatTelegramMessage(streamContent, thinkingContent, reasoningContent, true);
-		yield repairMarkdownV2(final.text);
+		yield final.text;
+	}
+}
+
+/**
+ * Converts a stream of prefix-append-only snapshots into a stream of incremental deltas.
+ */
+async function* snapshotsToDeltas(generator: AsyncGenerator<string>): AsyncGenerator<string> {
+	let lastValue = '';
+	for await (const value of generator) {
+		if (value.startsWith(lastValue)) {
+			yield value.slice(lastValue.length);
+			lastValue = value;
+		} else {
+			let commonLen = 0;
+			while (commonLen < lastValue.length && commonLen < value.length && lastValue[commonLen] === value[commonLen]) {
+				commonLen++;
+			}
+			yield value.slice(commonLen);
+			lastValue = value;
+		}
 	}
 }
 
@@ -952,7 +1001,6 @@ export async function streamAiResponseToTelegram(
 	};
 
 	const optimisticRaw = createOptimisticApi(ctx.api.raw);
-	const { streamMessage } = streamApi(optimisticRaw);
 
 	if (task.updateType === 'guest_message') {
 		let content = '';
@@ -987,14 +1035,14 @@ export async function streamAiResponseToTelegram(
 			reply_to_message_id: task.messageId,
 		});
 	} else {
-		// Use the plugin
 		if (task.chatId) {
 			const draftIdOffset = task.updateId || Date.now();
+			const { streamMessage } = streamApi(optimisticRaw);
+			const deltaStream = snapshotsToDeltas(wrappedStream);
 
 			// Note: We stream with MarkdownV2 for both drafts and the final message.
-			await streamMessage(Number(task.chatId), draftIdOffset, wrappedStream, otherDraft, {
+			await streamMessage(Number(task.chatId), draftIdOffset, deltaStream, otherDraft, {
 				...otherDraft,
-				parse_mode: 'MarkdownV2', 
 				reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
 			});
 		}
