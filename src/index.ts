@@ -144,6 +144,10 @@ async function chargeStars(
 				if (connectionId) {
 					const ownerData = await getBusinessOwnerData(ctx.api, ctx.env, connectionId);
 					if (ownerData) {
+						const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${String(ownerData.id)}`);
+						if (customPrompt) {
+							prompt = customPrompt;
+						}
 						prompt = prompt.replace(/{owner_name}/g, ownerData.name);
 						const facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
 						if (facts) {
@@ -153,8 +157,7 @@ async function chargeStars(
 				}
 				task.systemPrompt = prompt;
 			}
-		}
- else {
+		} else {
 			const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
 			if (customPrompt) {
 				task.systemPrompt = customPrompt;
@@ -319,6 +322,10 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 						if (ctx.has('business_message')) {
 							let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
 							if (ownerData) {
+								const customPrompt = await env.CONVERSATION_HISTORY.get(`prompt:${String(ownerData.id)}`);
+								if (customPrompt) {
+									prompt = customPrompt;
+								}
 								prompt = prompt.replace(/{owner_name}/g, ownerData.name);
 								const facts = await env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
 								if (facts) {
@@ -328,10 +335,13 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 							return prompt;
 						}
 						const isFileTask = !!ctx.msg?.document || !!(replyToMessage && replyToMessage.document);
+						const customPrompt = await env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
 						if (isFileTask) {
+							if (customPrompt) {
+								return customPrompt + '\n\nEnsure your responses are formatted using supported Telegram MarkdownV2.';
+							}
 							return 'You are a helpful assistant running on Telegram. Ensure your responses are formatted using supported Telegram MarkdownV2.';
 						}
-						const customPrompt = await env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
 						return customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
 					});
 
