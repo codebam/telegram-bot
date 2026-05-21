@@ -64,6 +64,13 @@ export async function parseTelegramFile(
 	try {
 		console.log(`[parseTelegramFile] Native JS parsing triggered for FileID: ${file_id}, Name: ${file_name}, Limit: ${limit}`);
 		
+		const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.heic', '.heif'];
+		const isImage = imageExtensions.some(ext => file_name.toLowerCase().endsWith(ext));
+		if (isImage) {
+			console.log(`[parseTelegramFile] File is an image. Skipping Vectorize indexing.`);
+			return `This file "${file_name}" is an image. Images cannot be indexed in the text vector database. Please use vision-capable models to analyze images.`;
+		}
+
 		const api = new Bot(env.SECRET_TELEGRAM_API_TOKEN).api;
 		const file = await api.getFile(file_id);
 		if (!file.file_path) {
@@ -148,13 +155,13 @@ export async function parseTelegramFile(
 		const introKey = `doc_intro:${file_id}`;
 		await env.CONVERSATION_HISTORY.put(introKey, rawText.substring(0, 10000), { expirationTtl: 86400 * 7 });
 
-		// RAG flow for large files
-		if (rawText.length >= 10000 && env.VECTORIZE) {
+		// RAG flow for all non-image files
+		if (env.VECTORIZE) {
 			const indexedKey = `indexed:${file_id}`;
 			const isAlreadyIndexed = await env.CONVERSATION_HISTORY.get(indexedKey);
 			if (isAlreadyIndexed) {
 				console.log(`[parseTelegramFile] File ${file_id} already indexed. Skipping indexing.`);
-				return `[SUCCESS] The document "${file_name}" is large and has been successfully indexed into the vector database. To access its contents, you MUST use the "search_telegram_file" tool with specific search queries. Do NOT assume you know the contents without searching.`;
+				return `[SUCCESS] The document "${file_name}" has been successfully indexed into the vector database. To access its contents, you MUST use the "search_telegram_file" tool with specific search queries. Do NOT assume you know the contents without searching.`;
 			}
 
 			const chunks = chunkText(rawText, 1000, 200);
@@ -207,11 +214,11 @@ export async function parseTelegramFile(
 
 				await env.CONVERSATION_HISTORY.put(indexedKey, 'true', { expirationTtl: 86400 * 7 });
 				console.log(`[parseTelegramFile] Successfully indexed ${chunks.length} vectors for ${file_id}`);
-				return `[SUCCESS] The document "${file_name}" is large and has been successfully indexed into the vector database. To access its contents, you MUST use the "search_telegram_file" tool with specific search queries. Do NOT assume you know the contents without searching.`;
+				return `[SUCCESS] The document "${file_name}" has been successfully indexed into the vector database. To access its contents, you MUST use the "search_telegram_file" tool with specific search queries. Do NOT assume you know the contents without searching.`;
 			}
 		}
 
-		// Fallback for smaller files or if VECTORIZE is not bound
+		// Fallback if VECTORIZE is not bound
 		return truncateFileContent(rawText, limit);
 
 	} catch (e) {
