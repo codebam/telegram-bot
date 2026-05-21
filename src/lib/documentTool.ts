@@ -305,22 +305,53 @@ export const createTelegramFileSearchTool = (
 					}
 				}
 
-				console.log(`[search_telegram_file] Embedding query: "${query}"`);
+				const formattedQuery = `Represent this sentence for searching relevant passages: ${query}`;
+				console.log(`[search_telegram_file] Embedding query: "${formattedQuery}"`);
 				const embedRes = (await env.AI.run('@cf/baai/bge-large-en-v1.5', {
-					text: [query]
+					text: [formattedQuery]
 				})) as { data: number[][] };
 
 				const queryVector = embedRes.data[0];
 
 				console.log(`[search_telegram_file] Querying Vectorize for FileID: ${file_id}`);
-				const searchRes = await env.VECTORIZE.query(queryVector, {
+				let searchRes = await env.VECTORIZE.query(queryVector, {
 					topK: 3,
-					filter: { file_id },
+					filter: { file_id: { $eq: file_id } },
 					returnMetadata: true
 				});
 
 				if (!searchRes.matches || searchRes.matches.length === 0) {
-					console.log(`[search_telegram_file] Vectorize returned 0 matches. Attempting intro fallback.`);
+					console.log(`[search_telegram_file] Vectorize returned 0 matches with filter. Checking if we need to force self-healing re-index...`);
+					const indexedKey = `indexed:${file_id}`;
+					const isIndexed = await env.CONVERSATION_HISTORY.get(indexedKey);
+					
+					if (isIndexed) {
+						console.log(`[search_telegram_file] Document was marked as indexed but returned 0 matches. Forcing re-indexing to apply active metadata indexes...`);
+						await env.CONVERSATION_HISTORY.delete(indexedKey);
+						
+						const reindexResult = await parseTelegramFile(
+							env,
+							undefined,
+							'',
+							file_id,
+							file_name || 'document.md',
+							false,
+							undefined,
+							20000
+						);
+						console.log(`[search_telegram_file] Self-healing re-indexing result:`, reindexResult);
+						
+						console.log(`[search_telegram_file] Retrying Vectorize query after self-healing...`);
+						searchRes = await env.VECTORIZE.query(queryVector, {
+							topK: 3,
+							filter: { file_id: { $eq: file_id } },
+							returnMetadata: true
+						});
+					}
+				}
+
+				if (!searchRes.matches || searchRes.matches.length === 0) {
+					console.log(`[search_telegram_file] Vectorize still returned 0 matches. Attempting intro fallback.`);
 					const intro = await env.CONVERSATION_HISTORY.get(`doc_intro:${file_id}`);
 					if (intro) {
 						return `No specific semantic matches found for "${query}". Here is the document overview / introduction for context:\n\n${intro}`;
