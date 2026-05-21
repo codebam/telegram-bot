@@ -260,21 +260,30 @@ except Exception as e:
 					const fileName = output_file.split('/').pop() || 'file';
 
 					if (contentBase64) {
-						const binaryString = atob(contentBase64 as string);
-						const bytes = new Uint8Array(binaryString.length);
-						for (let i = 0; i < binaryString.length; i++) {
-							bytes[i] = binaryString.charCodeAt(i);
-						}
+						const sentKey = `sent_document:${task.updateId || 'none'}:${fileName}`;
+						const alreadySent = await env.CONVERSATION_HISTORY.get(sentKey);
 
-						console.log(`[CodeWorkspace] Sending document ${fileName} back to user...`);
-						await api.sendDocument(Number(task.chatId), new InputFile(bytes, fileName), {
-							message_thread_id: task.threadId,
-							business_connection_id: task.businessConnectionId,
-							caption: `Here is the requested file: \`${fileName}\``,
-							parse_mode: 'MarkdownV2',
-							reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
-						});
-						fileSentMsg = `\nRetrieved and sent ${output_file} back to user via Telegram.`;
+						if (alreadySent) {
+							console.log(`[CodeWorkspace] Document ${fileName} already sent for update ${task.updateId}. Skipping.`);
+							fileSentMsg = `\nSkipped sending ${output_file} as it was already sent.`;
+						} else {
+							const binaryString = atob(contentBase64 as string);
+							const bytes = new Uint8Array(binaryString.length);
+							for (let i = 0; i < binaryString.length; i++) {
+								bytes[i] = binaryString.charCodeAt(i);
+							}
+
+							console.log(`[CodeWorkspace] Sending document ${fileName} back to user...`);
+							await api.sendDocument(Number(task.chatId), new InputFile(bytes, fileName), {
+								message_thread_id: task.threadId,
+								business_connection_id: task.businessConnectionId,
+								caption: `Here is the requested file: \`${fileName}\``,
+								parse_mode: 'MarkdownV2',
+								reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+							});
+							await env.CONVERSATION_HISTORY.put(sentKey, 'true', { expirationTtl: 3600 });
+							fileSentMsg = `\nRetrieved and sent ${output_file} back to user via Telegram.`;
+						}
 					}
 				}
 
