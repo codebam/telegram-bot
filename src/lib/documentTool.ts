@@ -137,6 +137,65 @@ export async function parseTelegramFile(
 				console.log(`[parseTelegramFile] JSZip failed for PPTX/PPT. Falling back to legacy binary string extraction...`);
 				rawText = extractPrintableStrings(arrayBuffer);
 			}
+		} else if (ext === '.csv') {
+			console.log(`[parseTelegramFile] Parsing CSV file...`);
+			const decoder = new TextDecoder('utf-8');
+			const csvText = decoder.decode(arrayBuffer);
+			const rows = csvText.split('\n').map(row => row.split(',').map(cell => cell.trim()));
+			if (rows.length > 0) {
+				const markdownRows = rows.map(cols => `| ${cols.join(' | ')} |`);
+				const headerSep = `| ${rows[0].map(() => '---').join(' | ')} |`;
+				rawText = [markdownRows[0], headerSep, ...markdownRows.slice(1)].join('\n');
+			} else {
+				rawText = csvText;
+			}
+		} else if (ext === '.xlsx') {
+			console.log(`[parseTelegramFile] Parsing XLSX via JSZip...`);
+			try {
+				const zip = await JSZip.loadAsync(arrayBuffer);
+				const sharedStrings: string[] = [];
+				const sharedStringsXml = await zip.file('xl/sharedStrings.xml')?.async('text');
+				if (sharedStringsXml) {
+					const stringMatches = sharedStringsXml.match(/<t[^>]*>([^<]*)<\/t>/g) || [];
+					for (const match of stringMatches) {
+						sharedStrings.push(match.replace(/<[^>]+>/g, ''));
+					}
+				}
+				const sheet1Xml = await zip.file('xl/worksheets/sheet1.xml')?.async('text');
+				if (sheet1Xml) {
+					const sheetTexts: string[] = [];
+					const rowsMatches = sheet1Xml.match(/<row[^>]*>([\s\S]*?)<\/row>/g) || [];
+					for (const rowXml of rowsMatches) {
+						const cellsMatches = rowXml.match(/<c[^>]*>([\s\S]*?)<\/c>/g) || [];
+						const rowCells: string[] = [];
+						for (const cellXml of cellsMatches) {
+							const isSharedString = /t="s"/i.test(cellXml);
+							const valueMatch = cellXml.match(/<v>([^<]*)<\/v>/);
+							if (valueMatch) {
+								const val = valueMatch[1];
+								if (isSharedString) {
+									const stringIdx = parseInt(val, 10);
+									rowCells.push(sharedStrings[stringIdx] || '');
+								} else {
+									rowCells.push(val);
+								}
+							} else {
+								rowCells.push('');
+							}
+						}
+						if (rowCells.some(cell => cell.trim())) {
+							sheetTexts.push(`| ${rowCells.join(' | ')} |`);
+						}
+					}
+					if (sheetTexts.length > 0) {
+						const headerSep = `| ${Array(sheetTexts[0].split('|').length - 2).fill('---').join(' | ')} |`;
+						rawText = [sheetTexts[0], headerSep, ...sheetTexts.slice(1)].join('\n');
+					}
+				}
+			} catch (e) {
+				console.log(`[parseTelegramFile] JSZip failed for XLSX. Falling back to legacy binary string extraction...`);
+				rawText = extractPrintableStrings(arrayBuffer);
+			}
 		} else if (ext === '.txt' || ext === '.md' || ext === '.markdown') {
 			console.log(`[parseTelegramFile] Parsing TXT/MD file...`);
 			const decoder = new TextDecoder('utf-8');

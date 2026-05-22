@@ -1,7 +1,7 @@
 import { Bot, Api, Context, webhookCallback, session, GrammyError, HttpError, InputFile } from 'grammy';
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
-import { autoRetry } from '@grammyjs/auto-retry';
 import { stream, type StreamFlavor } from '@grammyjs/stream';
+
 import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
@@ -11,6 +11,7 @@ import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool, cr
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
 
+import { getSandbox } from '@cloudflare/sandbox';
 export { Sandbox } from '@cloudflare/sandbox';
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -108,6 +109,15 @@ async function chargeStars(
 	task.guestQueryId = ctx.update.guest_message?.guest_query_id;
 	task.businessConnectionId = ctx.businessMessage?.business_connection_id?.toString();
 	task.threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
+	
+	if (ctx.update.update_id) {
+		const processedKey = `processed_update:${String(ctx.update.update_id)}`;
+		const alreadyProcessed = await ctx.env.CONVERSATION_HISTORY.get(processedKey);
+		if (alreadyProcessed) {
+			console.log(`[chargeStars] Update ${ctx.update.update_id} already processed. Skipping duplicate workflow.`);
+			return;
+		}
+	}
 	
 	const balanceKey = `balance:${String(billingUserId)}`;
 	const balance = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
@@ -409,16 +419,29 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
-	bot.api.config.use(autoRetry());
 	bot.api.config.use(async (prev, method, payload, signal) => {
 		console.log(`[Grammy-API] Request: ${method}, Payload:`, JSON.stringify(payload));
-		try {
-			const res = await prev(method, payload, signal);
-			console.log(`[Grammy-API] Success: ${method}`);
-			return res;
-		} catch (e) {
-			console.error(`[Grammy-API] Error in ${method}:`, e);
-			throw e;
+		let attempt = 0;
+		const maxAttempts = 3;
+		let delay = 1000;
+		while (true) {
+			try {
+				const res = await prev(method, payload, signal);
+				console.log(`[Grammy-API] Success: ${method}`);
+				return res;
+			} catch (e: any) {
+				attempt++;
+				const isRateLimit = e?.error_code === 429 || e?.status === 429 || String(e).includes('429');
+				if (isRateLimit && attempt < maxAttempts) {
+					const retryAfter = e?.parameters?.retry_after || (delay / 1000);
+					console.warn(`[Grammy-API] 429 Rate limited on ${method}. Retrying in ${retryAfter}s. Attempt ${attempt}/${maxAttempts}`);
+					await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
+					delay *= 2;
+				} else {
+					console.error(`[Grammy-API] Error in ${method} on attempt ${attempt}:`, e);
+					throw e;
+				}
+			}
 		}
 	});
 
@@ -756,12 +779,64 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 
 async function processTask(task: Task, env: Environment): Promise<void> {
 	try {
+		if (task.updateId) {
+			const processedKey = `processed_update:${String(task.updateId)}`;
+			const alreadyProcessed = await env.CONVERSATION_HISTORY.get(processedKey);
+			if (alreadyProcessed) {
+				console.log(`[processTask] Update ${task.updateId} already processed. Skipping duplicate execution.`);
+				return;
+			}
+			await env.CONVERSATION_HISTORY.put(processedKey, 'true', { expirationTtl: 3600 });
+		}
+
+		// Proactively sync user uploaded files from R2 to Sandbox /workspace/
+		try {
+			const sandbox = getSandbox(env.Sandbox, String(task.userId));
+			const uploadsList = await env.R2.list({ prefix: `uploads/${task.userId}/` });
+			if (uploadsList && uploadsList.objects.length > 0) {
+				for (const obj of uploadsList.objects) {
+					const fileName = obj.key.split('/').pop();
+					if (fileName) {
+						const fileData = await env.R2.get(obj.key);
+						if (fileData) {
+							const buffer = await fileData.arrayBuffer();
+							const base64Data = arrayBufferToBase64(buffer);
+							await sandbox.writeFile(`/workspace/${fileName}`, base64Data);
+							console.log(`[processTask] Proactively synced uploaded file ${fileName} from R2 to sandbox.`);
+						}
+					}
+				}
+			}
+		} catch (se) {
+			console.warn(`[processTask] Sandbox not bound or R2 failed syncing user files:`, se);
+		}
+
 		const token = env.SECRET_TELEGRAM_API_TOKEN;
 		if (!token) {
 			throw new Error('SECRET_TELEGRAM_API_TOKEN is empty in processTask');
 		}
 		const botInstance = new Bot<MyContext>(token);
-		botInstance.api.config.use(autoRetry());
+		botInstance.api.config.use(async (prev, method, payload, signal) => {
+			let attempt = 0;
+			const maxAttempts = 3;
+			let delay = 1000;
+			while (true) {
+				try {
+					return await prev(method, payload, signal);
+				} catch (e: any) {
+					attempt++;
+					const isRateLimit = e?.error_code === 429 || e?.status === 429 || String(e).includes('429');
+					if (isRateLimit && attempt < maxAttempts) {
+						const retryAfter = e?.parameters?.retry_after || (delay / 1000);
+						console.warn(`[processTask-API] 429 Rate limited on ${method}. Retrying in ${retryAfter}s. Attempt ${attempt}/${maxAttempts}`);
+						await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
+						delay *= 2;
+					} else {
+						throw e;
+					}
+				}
+			}
+		});
 
 		if (task.type === 'voice' && task.fileId) {
 			try {
@@ -770,11 +845,26 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 				const fileRes = await fetch(fileUrl);
 				if (fileRes.ok) {
 					const audioData = await fileRes.arrayBuffer();
-					const transcription = (await env.AI.run('@cf/openai/whisper', {
-						audio: [...new Uint8Array(audioData)],
-					})) as { text: string };
-					if (transcription.text) {
-						task.prompt = transcription.text;
+					const hashBuffer = await crypto.subtle.digest('SHA-256', audioData);
+					const hashHex = Array.from(new Uint8Array(hashBuffer))
+						.map((b) => b.toString(16).padStart(2, '0'))
+						.join('');
+					const cacheKey = `whisper_cache:${hashHex}`;
+					let transcriptionText = await env.CONVERSATION_HISTORY.get(cacheKey);
+					if (!transcriptionText) {
+						console.log(`[processTask] Whisper Cache MISS. Running Whisper AI...`);
+						const transcription = (await env.AI.run('@cf/openai/whisper', {
+							audio: [...new Uint8Array(audioData)],
+						})) as { text: string };
+						transcriptionText = transcription.text || '';
+						if (transcriptionText) {
+							await env.CONVERSATION_HISTORY.put(cacheKey, transcriptionText, { expirationTtl: 86400 * 7 });
+						}
+					} else {
+						console.log(`[processTask] Whisper Cache HIT. Using cached transcription.`);
+					}
+					if (transcriptionText) {
+						task.prompt = transcriptionText;
 						task.type = 'message';
 					}
 				}
@@ -834,6 +924,13 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 							}
 						}
 					];
+					try {
+						const sandbox = getSandbox(env.Sandbox, String(task.userId));
+						await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
+						console.log(`[processTask] Proactively wrote uploaded_image.png to sandbox.`);
+					} catch (se) {
+						console.warn(`[processTask] Sandbox not bound or failed writing image:`, se);
+					}
 				}
 			} catch (e) {
 				console.error('[processTask] Failed to download image for vision task:', e);
@@ -948,6 +1045,28 @@ export default {
 			} catch (e) {
 				return new Response('Unauthorized: Invalid JSON', { status: 401 });
 			}
+
+			// Proactively sync user uploaded files from R2 to Sandbox /workspace/
+			try {
+				const sandbox = getSandbox(env.Sandbox, String(task.userId));
+				const uploadsList = await env.R2.list({ prefix: `uploads/${task.userId}/` });
+				if (uploadsList && uploadsList.objects.length > 0) {
+					for (const obj of uploadsList.objects) {
+						const fileName = obj.key.split('/').pop();
+						if (fileName) {
+							const fileData = await env.R2.get(obj.key);
+							if (fileData) {
+								const buffer = await fileData.arrayBuffer();
+								const base64Data = arrayBufferToBase64(buffer);
+								await sandbox.writeFile(`/workspace/${fileName}`, base64Data);
+								console.log(`[Fetch] Proactively synced uploaded file ${fileName} from R2 to sandbox.`);
+							}
+						}
+					}
+				}
+			} catch (se) {
+				console.warn(`[Fetch] Sandbox not bound or R2 failed syncing user files:`, se);
+			}
 			
 			console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
 
@@ -971,6 +1090,13 @@ export default {
 									}
 								}
 							];
+							try {
+								const sandbox = getSandbox(env.Sandbox, String(task.userId));
+								await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
+								console.log(`[Fetch] Proactively wrote uploaded_image.png to sandbox.`);
+							} catch (se) {
+								console.warn(`[Fetch] Sandbox not bound or failed writing image:`, se);
+							}
 						}
 					}
 				} catch (e) {
