@@ -959,7 +959,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 				createTavilySearchTool(env.TAVILY_API_KEY || ''),
 				createSandboxTool(env.Sandbox, String(task.userId)),
 				createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, modelId),
-				createTelegramFileSearchTool(env, modelId),
+				createTelegramFileSearchTool(env, String(task.userId), modelId),
 				createCodeWorkspaceTool(env, env.Sandbox, String(task.userId), botInstance.api, task),
 			],
 		);
@@ -1116,7 +1116,7 @@ export default {
 				createTavilySearchTool(env.TAVILY_API_KEY || ''),
 				createSandboxTool(env.Sandbox, String(task.userId)),
 				createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
-				createTelegramFileSearchTool(env, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
+				createTelegramFileSearchTool(env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
 				createCodeWorkspaceTool(env, env.Sandbox, String(task.userId), new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN).api, task),
 			];
 

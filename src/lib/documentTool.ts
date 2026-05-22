@@ -71,24 +71,56 @@ export async function parseTelegramFile(
 			return `This file "${file_name}" is an image. Images cannot be indexed in the text vector database. Please use vision-capable models to analyze images.`;
 		}
 
-		const api = new Bot(env.SECRET_TELEGRAM_API_TOKEN).api;
-		const file = await api.getFile(file_id);
-		if (!file.file_path) {
-			console.error(`[parseTelegramFile] Telegram getFile failed or returned no file_path:`, file);
-			return `Error: Failed to retrieve file path from Telegram API.`;
+		let arrayBuffer: ArrayBuffer | null = null;
+		if (_userId && file_id) {
+			const docMeta = await env.CONVERSATION_HISTORY.get<{ r2Key?: string }>(`doc_metadata:${_userId}:${file_id}`, 'json');
+			const r2Key = docMeta?.r2Key || `uploads/${_userId}/${file_id}`;
+			try {
+				const r2Object = await env.R2.get(r2Key);
+				if (r2Object) {
+					console.log(`[parseTelegramFile] R2 HIT for user uploaded file: ${r2Key}`);
+					arrayBuffer = await r2Object.arrayBuffer();
+				}
+			} catch (r2Err) {
+				console.log(`[parseTelegramFile] R2 check failed for ${r2Key}:`, r2Err);
+			}
 		}
 
-		const downloadUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
-		const downloadRes = await fetch(downloadUrl);
-		if (!downloadRes.ok) {
-			console.error(`[parseTelegramFile] Telegram file download failed: ${downloadRes.status}`);
-			return `Error: Failed to download file from Telegram. Status: ${downloadRes.status}`;
+		if (!arrayBuffer) {
+			try {
+				const api = new Bot(env.SECRET_TELEGRAM_API_TOKEN).api;
+				const file = await api.getFile(file_id);
+				if (file.file_path) {
+					const downloadUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
+					const downloadRes = await fetch(downloadUrl);
+					if (downloadRes.ok) {
+						arrayBuffer = await downloadRes.arrayBuffer();
+						console.log(`[parseTelegramFile] File downloaded from Telegram. Size: ${arrayBuffer.byteLength} bytes`);
+					}
+				}
+			} catch (tgErr) {
+				console.warn(`[parseTelegramFile] Telegram download failed:`, tgErr);
+			}
 		}
-		const arrayBuffer = await downloadRes.arrayBuffer();
-		console.log(`[parseTelegramFile] File downloaded from Telegram. Size: ${arrayBuffer.byteLength} bytes`);
+
+		if (!arrayBuffer) {
+			return `Error: Failed to retrieve file content from R2 or Telegram API for file_id "${file_id}".`;
+		}
+
+		const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+		const fileHash = Array.from(new Uint8Array(hashBuffer))
+			.map((b) => b.toString(16).padStart(2, '0'))
+			.join('');
+		const contentCacheKey = `parsed_content:${fileHash}`;
 
 		const ext = file_name.substring(file_name.lastIndexOf('.')).toLowerCase();
 		let rawText = '';
+
+		const cachedParse = await env.CONVERSATION_HISTORY.get<string>(contentCacheKey);
+		if (cachedParse) {
+			console.log(`[parseTelegramFile] Extraction Cache HIT for ${file_name} (${fileHash})`);
+			rawText = cachedParse;
+		} else {
 
 		if (ext === '.pdf') {
 			console.log(`[parseTelegramFile] Parsing PDF via unpdf...`);
@@ -206,6 +238,12 @@ export async function parseTelegramFile(
 			rawText = decoder.decode(arrayBuffer);
 		}
 
+		if (rawText.trim()) {
+			await env.CONVERSATION_HISTORY.put(contentCacheKey, rawText, { expirationTtl: 86400 * 7 });
+			console.log(`[parseTelegramFile] Extracted text cached under ${contentCacheKey}`);
+		}
+	}
+
 		if (!rawText.trim()) {
 			return 'Document parsed successfully but no text content found.';
 		}
@@ -316,6 +354,7 @@ export const createTelegramFileReaderTool = (
 
 export const createTelegramFileSearchTool = (
 	env: Environment,
+	userId: string,
 	_modelId: string
 ) => {
 	return {
@@ -344,7 +383,7 @@ export const createTelegramFileSearchTool = (
 					const parseResult = await parseTelegramFile(
 						env,
 						undefined,
-						'',
+						userId,
 						file_id,
 						file_name || 'document.md',
 						false,
