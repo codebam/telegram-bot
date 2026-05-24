@@ -396,6 +396,7 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 					} catch (e) {
 						console.error('[chatConversation] Failed to send chat action:', e);
 					}
+					const balanceKey = `balance:${String(billingUserId)}`;
 					const newBalance = balance - amount;
 					await conversation.external(async () => {
 						await env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(newBalance));
