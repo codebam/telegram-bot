@@ -4,9 +4,9 @@
 	"version": "0.0.1",
 	"type": "module",
 	"scripts": {
-		"build": "bun build src/index.ts --outfile=dist/index.js --target=browser --external cloudflare:* && bunx wrangler-native-bun types --check",
-		"deploy": "bunx wrangler-native-bun deploy",
-		"start": "bunx wrangler-native-bun dev",
+		"build": "npx wrangler types --check",
+		"deploy": "npx wrangler deploy",
+		"start": "npx wrangler dev",
 		"check": "tsc --noEmit"
 	},
 	"devDependencies": {
