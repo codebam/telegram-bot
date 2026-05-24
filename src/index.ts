@@ -1,6 +1,7 @@
 import { Bot, Api, Context, webhookCallback, session, GrammyError, HttpError, InputFile } from 'grammy';
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
 import { stream, type StreamFlavor } from '@grammyjs/stream';
+import { Hono } from 'hono';
 
 import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
@@ -1013,211 +1014,198 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 	}
 }
 
-export default {
-	BotWorkflow,
-	async queue(_batch: MessageBatch<any>, _env: Environment): Promise<void> {
-		console.log('[Queue] Dummy handler (Queues are being removed)');
-	},
-	async fetch(request: Request, env: Environment, executionCtx: ExecutionContext): Promise<Response> {
-		const url = new URL(request.url);
-		const xSource = request.headers.get('x-source');
-		const xTelegramAuth = request.headers.get('x-telegram-auth');
-		console.log(`[Fetch] Incoming request: ${request.method} ${url.href} (hostname: ${url.hostname}, source: ${xSource})`);
+const app = new Hono<{ Bindings: Environment }>();
 
-		if (url.pathname === '/verify') {
-			try {
-				const body = await request.json() as { authProof?: string };
-				if (body.authProof) {
-					const isInitDataValid = await verifyTelegramWebAppData(body.authProof, env.SECRET_TELEGRAM_API_TOKEN);
-					const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(body.authProof, env.SECRET_TELEGRAM_API_TOKEN);
-					if (isInitDataValid || isLoginDataValid) {
-						return new Response(JSON.stringify({ valid: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-					}
-				}
-			} catch (e) {
-				return new Response(JSON.stringify({ valid: false }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+app.post('/verify', async (c) => {
+	try {
+		const body = await c.req.json() as { authProof?: string };
+		if (body.authProof) {
+			const isInitDataValid = await verifyTelegramWebAppData(body.authProof, c.env.SECRET_TELEGRAM_API_TOKEN);
+			const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(body.authProof, c.env.SECRET_TELEGRAM_API_TOKEN);
+			if (isInitDataValid || isLoginDataValid) {
+				return c.json({ valid: true }, 200);
 			}
-			return new Response(JSON.stringify({ valid: false }), { status: 401, headers: { 'Content-Type': 'application/json' } });
 		}
+	} catch (e) {
+		return c.json({ valid: false }, 401);
+	}
+	return c.json({ valid: false }, 401);
+});
 
-		if (url.hostname === 'workflow.local' || url.pathname === '/workflow' || xSource === 'webapp') {
-			if (!xTelegramAuth) {
-				return new Response('Unauthorized: Missing Telegram auth proof', { status: 401 });
-			}
-			
-			const isInitDataValid = await verifyTelegramWebAppData(xTelegramAuth, env.SECRET_TELEGRAM_API_TOKEN);
-			const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(xTelegramAuth, env.SECRET_TELEGRAM_API_TOKEN);
-			
-			if (!isInitDataValid && !isLoginDataValid) {
-				return new Response('Unauthorized: Invalid Telegram auth proof', { status: 401 });
-			}
-			
-			let task: Task;
-			try {
-				task = await request.json() as Task;
-			} catch (e) {
-				return new Response('Unauthorized: Invalid JSON', { status: 401 });
-			}
+app.post('/workflow', async (c) => {
+	const xTelegramAuth = c.req.header('x-telegram-auth');
 
-			// Proactively sync user uploaded files from R2 to Sandbox /workspace/
-			try {
-				const sandbox = getSandbox(env.Sandbox, String(task.userId));
-				const uploadsList = await env.R2.list({ prefix: `uploads/${task.userId}/` });
-				if (uploadsList && uploadsList.objects.length > 0) {
-					for (const obj of uploadsList.objects) {
-						const fileName = obj.key.split('/').pop();
-						if (fileName) {
-							const fileData = await env.R2.get(obj.key);
-							if (fileData) {
-								const buffer = await fileData.arrayBuffer();
-								const base64Data = arrayBufferToBase64(buffer);
-								await sandbox.writeFile(`/workspace/${fileName}`, base64Data);
-								console.log(`[Fetch] Proactively synced uploaded file ${fileName} from R2 to sandbox.`);
-							}
-						}
+	if (!xTelegramAuth) {
+		return c.text('Unauthorized: Missing Telegram auth proof', 401);
+	}
+	
+	const isInitDataValid = await verifyTelegramWebAppData(xTelegramAuth, c.env.SECRET_TELEGRAM_API_TOKEN);
+	const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(xTelegramAuth, c.env.SECRET_TELEGRAM_API_TOKEN);
+	
+	if (!isInitDataValid && !isLoginDataValid) {
+		return c.text('Unauthorized: Invalid Telegram auth proof', 401);
+	}
+	
+	let task: Task;
+	try {
+		task = await c.req.json() as Task;
+	} catch (e) {
+		return c.text('Unauthorized: Invalid JSON', 401);
+	}
+
+	// Proactively sync user uploaded files from R2 to Sandbox /workspace/
+	try {
+		const sandbox = getSandbox(c.env.Sandbox, String(task.userId));
+		const uploadsList = await c.env.R2.list({ prefix: `uploads/${task.userId}/` });
+		if (uploadsList && uploadsList.objects.length > 0) {
+			for (const obj of uploadsList.objects) {
+				const fileName = obj.key.split('/').pop();
+				if (fileName) {
+					const fileData = await c.env.R2.get(obj.key);
+					if (fileData) {
+						const buffer = await fileData.arrayBuffer();
+						const base64Data = arrayBufferToBase64(buffer);
+						await sandbox.writeFile(`/workspace/${fileName}`, base64Data);
+						console.log(`[Fetch] Proactively synced uploaded file ${fileName} from R2 to sandbox.`);
 					}
 				}
-			} catch (se) {
-				console.warn(`[Fetch] Sandbox not bound or R2 failed syncing user files:`, se);
 			}
-			
-			console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
+		}
+	} catch (se) {
+		console.warn(`[Fetch] Sandbox not bound or R2 failed syncing user files:`, se);
+	}
+	
+	console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
 
-			const userMessage: ChatMessage = { role: 'user', content: task.prompt };
-			if (task.type === 'photo' && task.fileId) {
-				try {
-					const api = new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN).api;
-					const file = await api.getFile(task.fileId);
-					if (file.file_path) {
-						const fileUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
-						const fileRes = await fetch(fileUrl);
-						if (fileRes.ok) {
-							const arrayBuffer = await fileRes.arrayBuffer();
-							const base64Data = arrayBufferToBase64(arrayBuffer);
-							userMessage.geminiParts = [
-								{ text: task.prompt || 'Please describe this image' },
-								{
-									inlineData: {
-										mimeType: 'image/jpeg',
-										data: base64Data
-									}
-								}
-							];
-							try {
-								const sandbox = getSandbox(env.Sandbox, String(task.userId));
-								await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
-								console.log(`[Fetch] Proactively wrote uploaded_image.png to sandbox.`);
-							} catch (se) {
-								console.warn(`[Fetch] Sandbox not bound or failed writing image:`, se);
+	const userMessage: ChatMessage = { role: 'user', content: task.prompt };
+	if (task.type === 'photo' && task.fileId) {
+		try {
+			const api = new Bot<MyContext>(c.env.SECRET_TELEGRAM_API_TOKEN).api;
+			const file = await api.getFile(task.fileId);
+			if (file.file_path) {
+				const fileUrl = `https://api.telegram.org/file/bot${c.env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
+				const fileRes = await fetch(fileUrl);
+				if (fileRes.ok) {
+					const arrayBuffer = await fileRes.arrayBuffer();
+					const base64Data = arrayBufferToBase64(arrayBuffer);
+					userMessage.geminiParts = [
+						{ text: task.prompt || 'Please describe this image' },
+						{
+							inlineData: {
+								mimeType: 'image/jpeg',
+								data: base64Data
 							}
 						}
+					];
+					try {
+						const sandbox = getSandbox(c.env.Sandbox, String(task.userId));
+						await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
+						console.log(`[Fetch] Proactively wrote uploaded_image.png to sandbox.`);
+					} catch (se) {
+						console.warn(`[Fetch] Sandbox not bound or failed writing image:`, se);
 					}
-				} catch (e) {
-					console.error('[Fetch] Failed to download image for vision task:', e);
 				}
 			}
+		} catch (e) {
+			console.error('[Fetch] Failed to download image for vision task:', e);
+		}
+	}
 
-			const messages = [
-				{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
-				...(task.history || []),
-				userMessage,
-			];
+	const messages = [
+		{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
+		...(task.history || []),
+		userMessage,
+	];
 
-			const tools = [
-				fetchTool,
-				wikipediaTool,
-				createTavilySearchTool(env.TAVILY_API_KEY || ''),
-				createSandboxTool(env.Sandbox, String(task.userId)),
-				createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
-				createTelegramFileSearchTool(env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
-				createCodeWorkspaceTool(env, env.Sandbox, String(task.userId), new Bot<MyContext>(env.SECRET_TELEGRAM_API_TOKEN).api, task),
-			];
+	const tools = [
+		fetchTool,
+		wikipediaTool,
+		createTavilySearchTool(c.env.TAVILY_API_KEY || ''),
+		createSandboxTool(c.env.Sandbox, String(task.userId)),
+		createTelegramFileReaderTool(c.env, c.env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
+		createTelegramFileSearchTool(c.env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
+		createCodeWorkspaceTool(c.env, c.env.Sandbox, String(task.userId), new Bot<MyContext>(c.env.SECRET_TELEGRAM_API_TOKEN).api, task),
+	];
 
-			const aiResponse = await customRunWithTools(
-				env.AI,
-				task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8',
-				{ messages, tools: task.type === 'tool_call' ? tools : [] },
-				{ streamFinalResponse: task.stream || false },
-			);
+	const aiResponse = await customRunWithTools(
+		c.env.AI,
+		task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8',
+		{ messages, tools: task.type === 'tool_call' ? tools : [] },
+		{ streamFinalResponse: task.stream || false },
+	);
 
-			console.log(`[Fetch] aiResponse type: ${typeof aiResponse}, constructor: ${aiResponse && typeof aiResponse === 'object' ? aiResponse.constructor?.name : 'unknown'}`);
+	console.log(`[Fetch] aiResponse type: ${typeof aiResponse}, constructor: ${aiResponse && typeof aiResponse === 'object' ? aiResponse.constructor?.name : 'unknown'}`);
 
-			let stream: ReadableStream | null = null;
-			if (aiResponse instanceof ReadableStream) {
-				stream = aiResponse;
-			} else if (aiResponse && typeof aiResponse === 'object' && 'body' in aiResponse && aiResponse.body instanceof ReadableStream) {
-				stream = aiResponse.body;
-			} else if (aiResponse && typeof aiResponse === 'object' && 'getReader' in aiResponse && typeof aiResponse.getReader === 'function') {
-				stream = aiResponse as unknown as ReadableStream;
-			}
+	let stream: ReadableStream | null = null;
+	if (aiResponse instanceof ReadableStream) {
+		stream = aiResponse;
+	} else if (aiResponse && typeof aiResponse === 'object' && 'body' in aiResponse && aiResponse.body instanceof ReadableStream) {
+		stream = aiResponse.body;
+	} else if (aiResponse && typeof aiResponse === 'object' && 'getReader' in aiResponse && typeof aiResponse.getReader === 'function') {
+		stream = aiResponse as unknown as ReadableStream;
+	}
 
-			if (task.stream && stream) {
-				console.log(`[Fetch] Returning streaming response. Locked: ${stream.locked}`);
-				return new Response(stream, {
-					headers: { 'Content-Type': 'text/event-stream' },
-				});
-			}
+	if (task.stream && stream) {
+		console.log(`[Fetch] Returning streaming response. Locked: ${stream.locked}`);
+		return new Response(stream, {
+			headers: { 'Content-Type': 'text/event-stream' },
+		});
+	}
 
-			console.log('[Fetch] Returning JSON response');
-			return new Response(JSON.stringify(aiResponse), {
-				headers: { 'Content-Type': 'application/json' },
+	console.log('[Fetch] Returning JSON response');
+	return c.json(aiResponse);
+});
+
+app.all('*', async (c) => {
+	const url = new URL(c.req.url);
+	const method = c.req.method;
+
+	if (method === 'GET' && c.req.query('command') === 'set') {
+		const token = c.env.SECRET_TELEGRAM_API_TOKEN;
+		const webhookUrl = `${url.origin}${url.pathname}`;
+		const api = new Bot<MyContext>(token).api;
+
+		try {
+			const result = await api.setWebhook(webhookUrl, {
+				max_connections: 40,
+				allowed_updates: [
+					'message',
+					'edited_message',
+					'callback_query',
+					'guest_message',
+					'business_message',
+					'business_connection',
+					'pre_checkout_query',
+				],
+				drop_pending_updates: true,
 			});
+			return c.json({ ok: result });
+		} catch (e: any) {
+			return c.json({ ok: false, error: e.message }, 500);
 		}
+	}
 
-		const token = env.SECRET_TELEGRAM_API_TOKEN;
+	if (method === 'POST') {
+		const token = c.env.SECRET_TELEGRAM_API_TOKEN;
 		if (!token) {
 			console.error('[Fetch] SECRET_TELEGRAM_API_TOKEN is empty or undefined!');
-			return new Response('Error: SECRET_TELEGRAM_API_TOKEN is missing', { status: 500 });
+			return c.text('Error: SECRET_TELEGRAM_API_TOKEN is missing', 500);
 		}
 		const bot = new Bot<MyContext>(token);
-		setupBot(bot, env, executionCtx);
+		setupBot(bot, c.env, c.executionCtx);
 
-		if (request.method === 'POST') {
-			const clone = request.clone();
-			try {
-				const body = await clone.json();
-				console.log('[Fetch] Incoming Update:', JSON.stringify(body));
-			} catch (e) {
-				console.error('[Fetch] Error parsing update body:', e);
-			}
-		}
-
-		if (request.method === 'GET') {
-			const url = new URL(request.url);
-			if (url.searchParams.get('command') === 'set') {
-				const token = env.SECRET_TELEGRAM_API_TOKEN;
-				const webhookUrl = `${url.origin}${url.pathname}`;
-				const api = new Bot<MyContext>(token).api;
-
-				try {
-					const result = await api.setWebhook(webhookUrl, {
-						max_connections: 40,
-						allowed_updates: [
-							'message',
-							'edited_message',
-							'callback_query',
-							'guest_message',
-							'business_message',
-							'business_connection',
-							'pre_checkout_query',
-						],
-						drop_pending_updates: true,
-					});
-					return new Response(JSON.stringify({ ok: result }), {
-						headers: { 'Content-Type': 'application/json' },
-					});
-				} catch (e: any) {
-					return new Response(JSON.stringify({ ok: false, error: e.message }), {
-						headers: { 'Content-Type': 'application/json' },
-						status: 500,
-					});
-				}
-			}
-		}
+		const clone = c.req.raw.clone();
 		try {
-			return await webhookCallback(bot, 'cloudflare-mod', {
+			const body = await clone.json();
+			console.log('[Fetch] Incoming Update:', JSON.stringify(body));
+		} catch (e) {
+			console.error('[Fetch] Error parsing update body:', e);
+		}
+
+		try {
+			return await webhookCallback(bot, 'hono', {
 				onTimeout: 'return',
-			})(request);
+			})(c);
 		} catch (e: any) {
 			console.error('[Fetch-Webhook-Error] Error during webhook update handling:', e);
 			if (e instanceof GrammyError) {
@@ -1227,7 +1215,11 @@ export default {
 			} else if (e instanceof Error) {
 				console.error(`[Fetch-Webhook-Error] Stack trace:\n${e.stack}`);
 			}
-			return new Response('Internal Webhook Error', { status: 500 });
+			return c.text('Internal Webhook Error', 500);
 		}
-		},
-		};
+	}
+
+	return c.text('OK');
+});
+
+export default app;
