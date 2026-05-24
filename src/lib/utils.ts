@@ -126,7 +126,72 @@ export const createTavilySearchTool = (apiKey: string) => ({
 
 import { getSandbox, type Sandbox } from '@cloudflare/sandbox';
 
-export const createSandboxTool = (sandboxBinding: DurableObjectNamespace<Sandbox>, userId: string) => ({
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+	return Buffer.from(buffer).toString('base64');
+}
+
+export async function syncUserSandboxWorkspace(userId: string, env: Environment): Promise<void> {
+	try {
+		const sandbox = getSandbox(env.Sandbox, userId);
+		const uploadsList = await env.R2.list({ prefix: `uploads/${userId}/` });
+		const activeFileNames: string[] = [];
+
+		if (uploadsList && uploadsList.objects.length > 0) {
+			for (const obj of uploadsList.objects) {
+				const fileName = obj.key.split('/').pop();
+				if (fileName) {
+					activeFileNames.push(fileName);
+					const cacheKey = `sandbox_sync:${userId}:${fileName}`;
+					const cachedEtag = await env.CONVERSATION_HISTORY.get(cacheKey);
+					if (cachedEtag === obj.etag) {
+						console.log(`[SandboxSync] File ${fileName} already synced (etag match). Skipping.`);
+						continue;
+					}
+					const fileData = await env.R2.get(obj.key);
+					if (fileData) {
+						const buffer = await fileData.arrayBuffer();
+						const base64Data = arrayBufferToBase64(buffer);
+						await sandbox.writeFile(`/workspace/${fileName}`, base64Data);
+						await env.CONVERSATION_HISTORY.put(cacheKey, obj.etag);
+						console.log(`[SandboxSync] Proactively synced uploaded file ${fileName} from R2 to sandbox.`);
+					}
+				}
+			}
+		}
+
+		// Cleanup files in sandbox that are no longer in R2 uploads list
+		const pythonCleanupCode = `
+import os
+import json
+
+allowed = json.loads("""${JSON.stringify(activeFileNames)}""")
+workspace_dir = "/workspace"
+
+if os.path.exists(workspace_dir):
+    removed_files = []
+    for name in os.listdir(workspace_dir):
+        path = os.path.join(workspace_dir, name)
+        if os.path.isfile(path) and name not in allowed and name != "uploaded_image.png":
+            try:
+                os.remove(path)
+                removed_files.append(name)
+            except Exception as e:
+                print(f"Error removing {name}: {e}")
+    if removed_files:
+        print(f"Cleaned up sandbox files: {', '.join(removed_files)}")
+`.trim();
+
+		const cleanupResult = await sandbox.runCode(pythonCleanupCode, { language: 'python' });
+		const stdout = cleanupResult.logs.stdout.join('');
+		if (stdout.trim()) {
+			console.log(`[SandboxSync-Cleanup] ${stdout.trim()}`);
+		}
+	} catch (e) {
+		console.warn(`[SandboxSync] Sync failed for user ${userId}:`, e);
+	}
+}
+
+export const createSandboxTool = (env: Environment, sandboxBinding: DurableObjectNamespace<Sandbox>, userId: string) => ({
 	name: 'code_interpreter',
 	description:
 		'Execute Python code in a secure sandbox environment. Use this tool for complex calculations, data processing, or running code snippets. The environment has internet access and common libraries (numpy, pandas, matplotlib) installed. Pass multi-line Python source as the `code` argument — do NOT wrap it in shell or `python -c`.',
@@ -142,6 +207,7 @@ export const createSandboxTool = (sandboxBinding: DurableObjectNamespace<Sandbox
 	},
 	function: async ({ code }: { code: string }) => {
 		try {
+			await syncUserSandboxWorkspace(userId, env);
 			const sandbox = getSandbox(sandboxBinding, userId);
 			const result = await sandbox.runCode(code, { language: 'python' });
 			return JSON.stringify({
@@ -198,6 +264,7 @@ export const createCodeWorkspaceTool = (
 		},
 		function: async ({ files, command, output_file }: { files: Array<{ path: string; content: string }>; command?: string; output_file?: string }) => {
 			try {
+				await syncUserSandboxWorkspace(userId, env);
 				const sandbox = getSandbox(sandboxBinding, userId);
 				
 				// 1. Write the files

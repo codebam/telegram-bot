@@ -19,67 +19,6 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 	return Buffer.from(buffer).toString('base64');
 }
 
-async function syncUserSandboxWorkspace(userId: string, env: Environment): Promise<void> {
-	try {
-		const sandbox = getSandbox(env.Sandbox, userId);
-		const uploadsList = await env.R2.list({ prefix: `uploads/${userId}/` });
-		const activeFileNames: string[] = [];
-
-		if (uploadsList && uploadsList.objects.length > 0) {
-			for (const obj of uploadsList.objects) {
-				const fileName = obj.key.split('/').pop();
-				if (fileName) {
-					activeFileNames.push(fileName);
-					const cacheKey = `sandbox_sync:${userId}:${fileName}`;
-					const cachedEtag = await env.CONVERSATION_HISTORY.get(cacheKey);
-					if (cachedEtag === obj.etag) {
-						console.log(`[SandboxSync] File ${fileName} already synced (etag match). Skipping.`);
-						continue;
-					}
-					const fileData = await env.R2.get(obj.key);
-					if (fileData) {
-						const buffer = await fileData.arrayBuffer();
-						const base64Data = arrayBufferToBase64(buffer);
-						await sandbox.writeFile(`/workspace/${fileName}`, base64Data);
-						await env.CONVERSATION_HISTORY.put(cacheKey, obj.etag);
-						console.log(`[SandboxSync] Proactively synced uploaded file ${fileName} from R2 to sandbox.`);
-					}
-				}
-			}
-		}
-
-		// Cleanup files in sandbox that are no longer in R2 uploads list
-		const pythonCleanupCode = `
-import os
-import json
-
-allowed = json.loads("""${JSON.stringify(activeFileNames)}""")
-workspace_dir = "/workspace"
-
-if os.path.exists(workspace_dir):
-    removed_files = []
-    for name in os.listdir(workspace_dir):
-        path = os.path.join(workspace_dir, name)
-        if os.path.isfile(path) and name not in allowed and name != "uploaded_image.png":
-            try:
-                os.remove(path)
-                removed_files.append(name)
-            except Exception as e:
-                print(f"Error removing {name}: {e}")
-    if removed_files:
-        print(f"Cleaned up sandbox files: {', '.join(removed_files)}")
-`.trim();
-
-		const cleanupResult = await sandbox.runCode(pythonCleanupCode, { language: 'python' });
-		const stdout = cleanupResult.logs.stdout.join('');
-		if (stdout.trim()) {
-			console.log(`[SandboxSync-Cleanup] ${stdout.trim()}`);
-		}
-	} catch (e) {
-		console.warn(`[SandboxSync] Sync failed for user ${userId}:`, e);
-	}
-}
-
 type BaseContext = CommandsFlavor &
 	Context & {
 		env: Environment;
@@ -890,8 +829,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 			await env.CONVERSATION_HISTORY.put(processedKey, 'true', { expirationTtl: 3600 });
 		}
 
-		// Proactively sync user uploaded files from R2 to Sandbox /workspace/ and cleanup deleted files
-		await syncUserSandboxWorkspace(String(task.userId), env);
+
 
 		const token = env.SECRET_TELEGRAM_API_TOKEN;
 		if (!token) {
@@ -1039,7 +977,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 				fetchTool,
 				wikipediaTool,
 				createTavilySearchTool(env.TAVILY_API_KEY || ''),
-				createSandboxTool(env.Sandbox, String(task.userId)),
+				createSandboxTool(env, env.Sandbox, String(task.userId)),
 				createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, modelId),
 				createTelegramFileSearchTool(env, String(task.userId), modelId),
 				createCodeWorkspaceTool(env, env.Sandbox, String(task.userId), botInstance.api, task),
@@ -1158,8 +1096,7 @@ app.post('/workflow', async (c) => {
 		return c.text('Unauthorized: Invalid JSON', 401);
 	}
 
-	// Proactively sync user uploaded files from R2 to Sandbox /workspace/ and cleanup deleted files
-	await syncUserSandboxWorkspace(String(task.userId), c.env);
+
 	
 	console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
 
@@ -1207,7 +1144,7 @@ app.post('/workflow', async (c) => {
 		fetchTool,
 		wikipediaTool,
 		createTavilySearchTool(c.env.TAVILY_API_KEY || ''),
-		createSandboxTool(c.env.Sandbox, String(task.userId)),
+		createSandboxTool(c.env, c.env.Sandbox, String(task.userId)),
 		createTelegramFileReaderTool(c.env, c.env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
 		createTelegramFileSearchTool(c.env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
 		createCodeWorkspaceTool(c.env, c.env.Sandbox, String(task.userId), new Bot<MyContext>(c.env.SECRET_TELEGRAM_API_TOKEN).api, task),
