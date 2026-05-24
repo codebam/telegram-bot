@@ -7,7 +7,7 @@ import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
-import { HistoryManager, getBalance, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, verifyTelegramWebAppData, verifyTelegramLogin, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
+import { HistoryManager, getBalance, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, verifyTelegramWebAppData, verifyTelegramLogin, logTransaction, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool, createCodeWorkspaceTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
@@ -17,6 +17,67 @@ export { Sandbox } from '@cloudflare/sandbox';
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
 	return Buffer.from(buffer).toString('base64');
+}
+
+async function syncUserSandboxWorkspace(userId: string, env: Environment): Promise<void> {
+	try {
+		const sandbox = getSandbox(env.Sandbox, userId);
+		const uploadsList = await env.R2.list({ prefix: `uploads/${userId}/` });
+		const activeFileNames: string[] = [];
+
+		if (uploadsList && uploadsList.objects.length > 0) {
+			for (const obj of uploadsList.objects) {
+				const fileName = obj.key.split('/').pop();
+				if (fileName) {
+					activeFileNames.push(fileName);
+					const cacheKey = `sandbox_sync:${userId}:${fileName}`;
+					const cachedEtag = await env.CONVERSATION_HISTORY.get(cacheKey);
+					if (cachedEtag === obj.etag) {
+						console.log(`[SandboxSync] File ${fileName} already synced (etag match). Skipping.`);
+						continue;
+					}
+					const fileData = await env.R2.get(obj.key);
+					if (fileData) {
+						const buffer = await fileData.arrayBuffer();
+						const base64Data = arrayBufferToBase64(buffer);
+						await sandbox.writeFile(`/workspace/${fileName}`, base64Data);
+						await env.CONVERSATION_HISTORY.put(cacheKey, obj.etag);
+						console.log(`[SandboxSync] Proactively synced uploaded file ${fileName} from R2 to sandbox.`);
+					}
+				}
+			}
+		}
+
+		// Cleanup files in sandbox that are no longer in R2 uploads list
+		const pythonCleanupCode = `
+import os
+import json
+
+allowed = json.loads("""${JSON.stringify(activeFileNames)}""")
+workspace_dir = "/workspace"
+
+if os.path.exists(workspace_dir):
+    removed_files = []
+    for name in os.listdir(workspace_dir):
+        path = os.path.join(workspace_dir, name)
+        if os.path.isfile(path) and name not in allowed and name != "uploaded_image.png":
+            try:
+                os.remove(path)
+                removed_files.append(name)
+            except Exception as e:
+                print(f"Error removing {name}: {e}")
+    if removed_files:
+        print(f"Cleaned up sandbox files: {', '.join(removed_files)}")
+`.trim();
+
+		const cleanupResult = await sandbox.runCode(pythonCleanupCode, { language: 'python' });
+		const stdout = cleanupResult.logs.stdout.join('');
+		if (stdout.trim()) {
+			console.log(`[SandboxSync-Cleanup] ${stdout.trim()}`);
+		}
+	} catch (e) {
+		console.warn(`[SandboxSync] Sync failed for user ${userId}:`, e);
+	}
 }
 
 type BaseContext = CommandsFlavor &
@@ -145,7 +206,16 @@ async function chargeStars(
 		} catch (e) {
 			console.log('[chargeStars] Failed to send chat action (likely not a member):', e);
 		}
-		await ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance - amount));
+		const newBalance = balance - amount;
+		await ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(newBalance));
+		await logTransaction(billingUserId || 0, ctx.env.CONVERSATION_HISTORY, {
+			amount,
+			type: 'charge',
+			model: task.modelId,
+			taskType: task.type,
+			newBalance,
+			description: 'AI Bot message charge'
+		});
 		task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
 
 		if (ctx.has('business_message')) {
@@ -326,8 +396,18 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 					} catch (e) {
 						console.error('[chatConversation] Failed to send chat action:', e);
 					}
-					const balanceKey = `balance:${String(billingUserId)}`;
-					await conversation.external(() => env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance - amount)));
+					const newBalance = balance - amount;
+					await conversation.external(async () => {
+						await env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(newBalance));
+						await logTransaction(billingUserId || 0, env.CONVERSATION_HISTORY, {
+							amount,
+							type: 'charge',
+							model: modelConfig.id,
+							taskType: ctx.has('business_message') ? 'business_message' : 'message',
+							newBalance,
+							description: 'AI Bot message charge'
+						});
+					});
 
 					const systemPrompt = await conversation.external(async () => {
 						if (ctx.has('business_message')) {
@@ -658,9 +738,15 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		if (payload.startsWith('load:')) {
 			const amount = parseInt(payload.split(':')[1]);
 			const balanceKey = `balance:${String(userId)}`;
-			const balance = (await ctx.env.CONVERSATION_HISTORY.get<number>(balanceKey, 'json')) ?? 0;
-			await ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(balance + amount));
-			await ctx.reply(`Successfully loaded ${String(amount)} Stars! New balance: ${String(balance + amount)} Stars.`);
+			const newBalance = balance + amount;
+			await ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(newBalance));
+			await logTransaction(userId, ctx.env.CONVERSATION_HISTORY, {
+				amount,
+				type: 'load',
+				newBalance,
+				description: 'Telegram Stars Top-up'
+			});
+			await ctx.reply(`Successfully loaded ${String(amount)} Stars! New balance: ${String(newBalance)} Stars.`);
 			return;
 		}
 
@@ -803,27 +889,8 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 			await env.CONVERSATION_HISTORY.put(processedKey, 'true', { expirationTtl: 3600 });
 		}
 
-		// Proactively sync user uploaded files from R2 to Sandbox /workspace/
-		try {
-			const sandbox = getSandbox(env.Sandbox, String(task.userId));
-			const uploadsList = await env.R2.list({ prefix: `uploads/${task.userId}/` });
-			if (uploadsList && uploadsList.objects.length > 0) {
-				for (const obj of uploadsList.objects) {
-					const fileName = obj.key.split('/').pop();
-					if (fileName) {
-						const fileData = await env.R2.get(obj.key);
-						if (fileData) {
-							const buffer = await fileData.arrayBuffer();
-							const base64Data = arrayBufferToBase64(buffer);
-							await sandbox.writeFile(`/workspace/${fileName}`, base64Data);
-							console.log(`[processTask] Proactively synced uploaded file ${fileName} from R2 to sandbox.`);
-						}
-					}
-				}
-			}
-		} catch (se) {
-			console.warn(`[processTask] Sandbox not bound or R2 failed syncing user files:`, se);
-		}
+		// Proactively sync user uploaded files from R2 to Sandbox /workspace/ and cleanup deleted files
+		await syncUserSandboxWorkspace(String(task.userId), env);
 
 		const token = env.SECRET_TELEGRAM_API_TOKEN;
 		if (!token) {
@@ -1090,27 +1157,8 @@ app.post('/workflow', async (c) => {
 		return c.text('Unauthorized: Invalid JSON', 401);
 	}
 
-	// Proactively sync user uploaded files from R2 to Sandbox /workspace/
-	try {
-		const sandbox = getSandbox(c.env.Sandbox, String(task.userId));
-		const uploadsList = await c.env.R2.list({ prefix: `uploads/${task.userId}/` });
-		if (uploadsList && uploadsList.objects.length > 0) {
-			for (const obj of uploadsList.objects) {
-				const fileName = obj.key.split('/').pop();
-				if (fileName) {
-					const fileData = await c.env.R2.get(obj.key);
-					if (fileData) {
-						const buffer = await fileData.arrayBuffer();
-						const base64Data = arrayBufferToBase64(buffer);
-						await sandbox.writeFile(`/workspace/${fileName}`, base64Data);
-						console.log(`[Fetch] Proactively synced uploaded file ${fileName} from R2 to sandbox.`);
-					}
-				}
-			}
-		}
-	} catch (se) {
-		console.warn(`[Fetch] Sandbox not bound or R2 failed syncing user files:`, se);
-	}
+	// Proactively sync user uploaded files from R2 to Sandbox /workspace/ and cleanup deleted files
+	await syncUserSandboxWorkspace(String(task.userId), c.env);
 	
 	console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
 

@@ -90,34 +90,34 @@ export const createTavilySearchTool = (apiKey: string) => ({
 	function: async (args: { query?: string; q?: string }) => {
 		const query = args.query || args.q || '';
 		try {
-			const res = await fetch(`https://mcp.tavily.com/mcp/?tavilyApiKey=${apiKey}`, {
+			const res = await fetch('https://api.tavily.com/search', {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
-					Accept: 'application/json, text/event-stream',
 				},
 				body: JSON.stringify({
-					jsonrpc: '2.0',
-					id: 1,
-					method: 'tools/call',
-					params: {
-						name: 'tavily_search',
-						arguments: { query },
-					},
+					api_key: apiKey,
+					query,
+					include_images: false,
+					include_answer: false,
 				}),
 			});
-			const text = await res.text();
-			const dataLine = text.split('\n').find((l) => l.startsWith('data: '));
-			if (dataLine) {
-				const data = JSON.parse(dataLine.substring(6));
-				if (data.result && data.result.content && data.result.content.length > 0) {
-					return data.result.content[0].text;
-				}
-				if (data.error) {
-					return `Error executing Tavily search: ${data.error.message}`;
-				}
+			if (!res.ok) {
+				return `Error executing Tavily search: HTTP ${res.status}`;
 			}
-			return `Error executing Tavily search: Unexpected response format.`;
+			const data = (await res.json()) as {
+				results?: Array<{ title: string; url: string; content: string }>;
+			};
+			if (data.results && data.results.length > 0) {
+				return JSON.stringify(
+					data.results.map((r) => ({
+						title: r.title,
+						url: r.url,
+						content: r.content,
+					}))
+				);
+			}
+			return 'No search results found.';
 		} catch (e) {
 			return `Error executing Tavily search: ${String(e)}`;
 		}
@@ -213,11 +213,13 @@ export const createCodeWorkspaceTool = (
 				if (command) {
 					console.log(`[CodeWorkspace] Executing command: ${command}`);
 					// We execute it by wrapping it in python subprocess to capture full stdout/stderr
+					const base64Command = Buffer.from(command).toString('base64');
 					const wrapperCode = `
+import base64
 import subprocess
 import sys
 
-cmd = """${command.replace(/"""/g, '\\"\\"\\"')}"""
+cmd = base64.b64decode("${base64Command}").decode('utf-8')
 print(f"Executing: {cmd}", flush=True)
 try:
     res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)

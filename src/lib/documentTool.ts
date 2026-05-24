@@ -264,24 +264,30 @@ export async function parseTelegramFile(
 			const chunks = chunkText(rawText, 1000, 200);
 			console.log(`[parseTelegramFile] Chunked document into ${chunks.length} chunks. Generating embeddings in parallel...`);
 
-			// Generate embeddings in parallel to prevent sequential wall-clock request timeouts
-			const embedResPromises = chunks.map(async (chunk, idx) => {
+			const cleanEmbedData: { index: number; vector: number[]; chunk: string }[] = [];
+			const embedBatchSize = 20;
+			for (let i = 0; i < chunks.length; i += embedBatchSize) {
+				const batchChunks = chunks.slice(i, i + embedBatchSize);
 				try {
+					console.log(`[parseTelegramFile] Generating embeddings for batch ${Math.floor(i / embedBatchSize) + 1}/${Math.ceil(chunks.length / embedBatchSize)}`);
 					const res = (await env.AI.run('@cf/baai/bge-large-en-v1.5', {
-						text: [chunk]
+						text: batchChunks
 					})) as { data: number[][] };
-					if (res && res.data && res.data[0]) {
-						console.log(`[parseTelegramFile] Completed embedding for chunk ${idx + 1}/${chunks.length}`);
-						return { index: idx, vector: res.data[0], chunk };
+					if (res && res.data) {
+						res.data.forEach((vector, idx) => {
+							if (vector) {
+								cleanEmbedData.push({
+									index: i + idx,
+									vector,
+									chunk: batchChunks[idx]
+								});
+							}
+						});
 					}
 				} catch (e) {
-					console.error(`[parseTelegramFile] Failed to generate embedding for chunk ${idx}:`, e);
+					console.error(`[parseTelegramFile] Failed to generate embedding for batch starting at ${i}:`, e);
 				}
-				return null;
-			});
-
-			const embedDataRaw = await Promise.all(embedResPromises);
-			const cleanEmbedData = embedDataRaw.filter((d): d is { index: number; vector: number[]; chunk: string } => d !== null);
+			}
 
 			if (cleanEmbedData.length > 0) {
 				const fileHash = await getShortHash(file_id);
