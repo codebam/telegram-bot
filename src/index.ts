@@ -1016,6 +1016,43 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 
 const app = new Hono<{ Bindings: Environment }>();
 
+app.onError((err, c) => {
+	console.error(`[Bot Error]: ${err.message}`);
+	if (err.stack) {
+		console.error(`[Bot Error Stack]:\n${err.stack}`);
+	}
+
+	// Return a 200 OK to Telegram so it doesn't continuously retry
+	// and spam a broken update loop into your server.
+	if (c.req.method === 'POST') {
+		const pathname = new URL(c.req.url).pathname;
+		if (pathname !== '/verify' && pathname !== '/workflow') {
+			return c.text('Internal handled', 200);
+		}
+	}
+
+	return c.text('Internal Server Error', 500);
+});
+
+// Middleware to verify Telegram Webhook Secret Token if configured
+app.use('*', async (c, next) => {
+	if (c.req.method === 'POST') {
+		const pathname = new URL(c.req.url).pathname;
+		// Skip verification for /verify and /workflow API routes
+		if (pathname !== '/verify' && pathname !== '/workflow') {
+			const expectedSecret = c.env.SECRET_TELEGRAM_WEBHOOK;
+			if (expectedSecret) {
+				const receivedSecret = c.req.header('X-Telegram-Bot-Api-Secret-Token');
+				if (receivedSecret !== expectedSecret) {
+					console.warn('[Security] Unauthorized webhook request: secret token mismatch');
+					return c.text('Unauthorized', 401);
+				}
+			}
+		}
+	}
+	await next();
+});
+
 app.post('/verify', async (c) => {
 	try {
 		const body = await c.req.json() as { authProof?: string };
@@ -1178,6 +1215,7 @@ app.all('*', async (c) => {
 					'pre_checkout_query',
 				],
 				drop_pending_updates: true,
+				secret_token: c.env.SECRET_TELEGRAM_WEBHOOK,
 			});
 			return c.json({ ok: result });
 		} catch (e: any) {
@@ -1204,6 +1242,7 @@ app.all('*', async (c) => {
 
 		try {
 			return await webhookCallback(bot, 'hono', {
+				timeoutMilliseconds: 15_000,
 				onTimeout: 'return',
 			})(c);
 		} catch (e: any) {
@@ -1215,7 +1254,7 @@ app.all('*', async (c) => {
 			} else if (e instanceof Error) {
 				console.error(`[Fetch-Webhook-Error] Stack trace:\n${e.stack}`);
 			}
-			return c.text('Internal Webhook Error', 500);
+			return c.text('Internal Webhook Error Handled', 200);
 		}
 	}
 
