@@ -5,7 +5,7 @@ FROM oven/bun:latest
 RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
 
 # Copy Cloudflare's sandbox agent binary from the official image
-COPY --from=docker.io/cloudflare/sandbox:latest /container-server/sandbox /sandbox
+COPY --from=docker.io/cloudflare/sandbox:0.10.2 /container-server/sandbox /sandbox
 
 # Set up your app or scripts
 WORKDIR /workspace
