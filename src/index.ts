@@ -469,7 +469,8 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
 			'<prompt> - Generate text (may use tools if supported by model)\n' +
 			'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
-			'/clear - Clear your conversation history\n\n' +
+			'/clear - Clear your conversation history\n' +
+			'/commit - Get the latest deployed commit link\n\n' +
 			'New users start with 200 free credits!' +
 			(isDev ? '' : '\n\nClick the button below to open the Web App!');
 
@@ -622,6 +623,18 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 				}
 			}
 			await ctx.reply(`Business facts updated to:\n\n${factsValue}`);
+		}
+	});
+
+	commands.command('commit', 'Get the latest deployed commit link', async (ctx) => {
+		const commitSha = ctx.env.COMMIT_SHA || 'unknown';
+		if (commitSha === 'unknown' || commitSha === 'dev') {
+			await ctx.reply(`Commit: \`${commitSha}\``);
+		} else {
+			const link = `https://codeberg.org/codebam/cf-workers-telegram-bot/commit/${commitSha}`;
+			await ctx.reply(`Latest deployed commit: [${commitSha.substring(0, 7)}](${link})`, {
+				parse_mode: 'Markdown',
+			});
 		}
 	});
 

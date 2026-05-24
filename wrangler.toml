@@ -5,6 +5,7 @@ compatibility_date = "2025-06-04"
 
 [vars]
 ENVIRONMENT = "production"
+COMMIT_SHA = "dev"
 
 [ai]
 binding = "AI"
@@ -43,6 +44,7 @@ name = "tux-robot-dev"
 
 [env.dev.vars]
 ENVIRONMENT = "dev"
+COMMIT_SHA = "dev"
 
 [env.dev.ai]
 binding = "AI"
@@ -77,6 +79,7 @@ name = "tux-robot"
 
 [env.production.vars]
 ENVIRONMENT = "production"
+COMMIT_SHA = "unknown"
 
 [env.production.ai]
 binding = "AI"
