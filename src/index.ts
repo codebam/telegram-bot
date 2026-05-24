@@ -678,6 +678,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		if (payload.startsWith('load:')) {
 			const amount = parseInt(payload.split(':')[1]);
 			const balanceKey = `balance:${String(userId)}`;
+			const balance = await getBalance(userId, ctx.env.CONVERSATION_HISTORY);
 			const newBalance = balance + amount;
 			await ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(newBalance));
 			await logTransaction(userId, ctx.env.CONVERSATION_HISTORY, {
