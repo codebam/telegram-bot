@@ -4,15 +4,15 @@
 	"version": "0.0.1",
 	"type": "module",
 	"scripts": {
-		"build": "bun build src/index.ts --outfile=dist/index.js --target=browser --external cloudflare:* && wrangler types --check",
-		"deploy": "wrangler deploy",
-		"start": "wrangler dev",
+		"build": "bun build src/index.ts --outfile=dist/index.js --target=browser --external cloudflare:* && bunx wrangler-native-bun types --check",
+		"deploy": "bunx wrangler-native-bun deploy",
+		"start": "bunx wrangler-native-bun dev",
 		"check": "tsc --noEmit"
 	},
 	"devDependencies": {
 		"@types/node": "^25.9.1",
 		"typescript": "^6.0.3",
-		"wrangler": "^4.94.0"
+		"wrangler-native-bun": "^1.0.4"
 	},
 	"dependencies": {
 		"@cloudflare/ai-utils": "^1.0.1",
