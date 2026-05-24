@@ -4,7 +4,7 @@
 	"version": "0.0.1",
 	"type": "module",
 	"scripts": {
-		"build": "wrangler types --check && tsc",
+		"build": "bun build src/index.ts --outfile=dist/index.js --target=browser --external cloudflare:* && wrangler types --check",
 		"deploy": "wrangler deploy",
 		"start": "wrangler dev",
 		"check": "tsc --noEmit"
