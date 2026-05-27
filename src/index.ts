@@ -123,12 +123,13 @@ async function chargeStars(
 	const balanceKey = `balance:${String(billingUserId)}`;
 	const balance = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
 
+	const defaultModel = await ctx.env.FLAGS?.getStringValue("default-model", "glm-4.7-flash", { userId: String(billingUserId) }) ?? "glm-4.7-flash";
 	const modelPreference =
-		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'glm-4.7-flash';
+		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? defaultModel;
 	const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['glm-4.7-flash'];
 
 	if (task.type === 'tool_call' && !modelConfig.supportsTools) {
-		task.modelId = AVAILABLE_MODELS['glm-4.7-flash'].id;
+		task.modelId = AVAILABLE_MODELS[defaultModel]?.id ?? AVAILABLE_MODELS['glm-4.7-flash'].id;
 	} else if ((task.type === 'photo' || task.geminiParts?.some((p) => p.inlineData)) && !modelConfig.supportsVision) {
 		task.modelId = AVAILABLE_MODELS['google/gemini-3.1-flash-lite'].id;
 	} else {
@@ -284,7 +285,8 @@ export function createChatConversation(env: Environment, executionCtx: Execution
 
 			const { balance, modelPreference } = await conversation.external(async () => {
 				const b = await getBalance(billingUserId || 0, env.CONVERSATION_HISTORY);
-				const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? 'glm-4.7-flash';
+				const defaultModel = await env.FLAGS?.getStringValue("default-model", "glm-4.7-flash", { userId: String(billingUserId) }) ?? "glm-4.7-flash";
+				const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? defaultModel;
 				return { balance: b, modelPreference: mp };
 			});
 
@@ -1141,15 +1143,25 @@ app.post('/workflow', async (c) => {
 		userMessage,
 	];
 
+	const isTavilyEnabled = await c.env.FLAGS?.getBooleanValue("tavily-search", false, { userId: String(task.userId) }) ?? false;
+	const isSandboxEnabled = await c.env.FLAGS?.getBooleanValue("code-sandbox", false, { userId: String(task.userId) }) ?? false;
+
 	const tools = [
 		fetchTool,
 		wikipediaTool,
-		createTavilySearchTool(c.env.TAVILY_API_KEY || ''),
-		createSandboxTool(c.env, c.env.Sandbox, String(task.userId)),
-		createTelegramFileReaderTool(c.env, c.env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
-		createTelegramFileSearchTool(c.env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'),
-		createCodeWorkspaceTool(c.env, c.env.Sandbox, String(task.userId), new Bot<MyContext>(c.env.SECRET_TELEGRAM_API_TOKEN).api, task),
 	];
+
+	if (isTavilyEnabled) {
+		tools.push(createTavilySearchTool(c.env.TAVILY_API_KEY || ''));
+	}
+
+	if (isSandboxEnabled) {
+		tools.push(createSandboxTool(c.env, c.env.Sandbox, String(task.userId)));
+		tools.push(createTelegramFileReaderTool(c.env, c.env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'));
+		tools.push(createCodeWorkspaceTool(c.env, c.env.Sandbox, String(task.userId), new Bot<MyContext>(c.env.SECRET_TELEGRAM_API_TOKEN).api, task));
+	}
+
+	tools.push(createTelegramFileSearchTool(c.env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'));
 
 	const aiResponse = await customRunWithTools(
 		c.env.AI,
