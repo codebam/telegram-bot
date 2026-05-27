@@ -41,7 +41,7 @@ class_name = "BotWorkflow"
 
 [[flagship]]
 binding = "FLAGS"
-app_id = "cf-workers-telegram-bot-app"
+app_id = "3689fb4b-a067-469d-a340-5687279d0c0f"
 
 [env.dev]
 name = "tux-robot-dev"
@@ -80,7 +80,7 @@ name = "Sandbox"
 
 [[env.dev.flagship]]
 binding = "FLAGS"
-app_id = "cf-workers-telegram-bot-app-dev"
+app_id = "b3141b98-e7db-4cfe-b215-ba57d6036003"
 
 [env.production]
 name = "tux-robot"
@@ -119,4 +119,4 @@ name = "Sandbox"
 
 [[env.production.flagship]]
 binding = "FLAGS"
-app_id = "cf-workers-telegram-bot-app-prod"
+app_id = "3689fb4b-a067-469d-a340-5687279d0c0f"
