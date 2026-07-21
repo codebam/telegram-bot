@@ -681,20 +681,20 @@ function createOptimisticApi(raw: any): any {
 		get(target, prop, receiver) {
 			if (prop === 'sendMessageDraft' || prop === 'sendRichMessageDraft') {
 				return async (data: any, signal?: AbortSignal) => {
-					let text = data.text || data.rich_message?.markdown || '';
-					const repairedText = text ? repairMarkdownV2(text) : text;
+					let rawText = data.text || data.rich_message?.markdown || '';
 					try {
 						return await target.sendRichMessageDraft({
 							chat_id: data.chat_id,
 							draft_id: data.draft_id,
 							rich_message: {
-								markdown: repairedText,
+								markdown: rawText,
 							},
 							message_thread_id: data.message_thread_id,
 							business_connection_id: data.business_connection_id,
 						}, signal);
 					} catch (e: any) {
 						console.warn(`[OptimisticApi] sendRichMessageDraft failed, falling back to sendMessageDraft:`, e);
+						const repairedText = rawText ? repairMarkdownV2(rawText) : rawText;
 						try {
 							return await target.sendMessageDraft({
 								...data,
@@ -717,13 +717,12 @@ function createOptimisticApi(raw: any): any {
 
 			if (prop === 'sendMessage' || prop === 'sendRichMessage') {
 				return async (data: any, signal?: AbortSignal) => {
-					let text = data.text || data.rich_message?.markdown || '';
-					const repairedText = text ? repairMarkdownV2(text) : text;
+					let rawText = data.text || data.rich_message?.markdown || '';
 					try {
 						return await target.sendRichMessage({
 							chat_id: data.chat_id,
 							rich_message: {
-								markdown: repairedText,
+								markdown: rawText,
 							},
 							message_thread_id: data.message_thread_id,
 							business_connection_id: data.business_connection_id,
@@ -731,6 +730,7 @@ function createOptimisticApi(raw: any): any {
 						}, signal);
 					} catch (e: any) {
 						console.warn(`[OptimisticApi] sendRichMessage failed, falling back to sendMessage:`, e);
+						const repairedText = rawText ? repairMarkdownV2(rawText) : rawText;
 						try {
 							return await target.sendMessage({
 								...data,
