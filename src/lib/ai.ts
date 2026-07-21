@@ -678,29 +678,74 @@ function createOptimisticApi(raw: any): any {
 
 	return new Proxy(raw, {
 		get(target, prop, receiver) {
-			if (prop === 'sendMessageDraft' || prop === 'sendMessage' || prop === 'sendRichMessageDraft' || prop === 'sendRichMessage') {
+			if (prop === 'sendMessageDraft' || prop === 'sendRichMessageDraft') {
 				return async (data: any, signal?: AbortSignal) => {
+					let text = data.text || data.rich_message?.markdown || '';
+					const repairedText = text ? repairMarkdownV2(text) : text;
 					try {
-						let text = data.text;
-						if (prop === 'sendMessage' && text) {
-							text = await markdownToMarkdownV2(text);
-						}
-						const repairedData = {
-							...data,
-							text: text ? repairMarkdownV2(text) : text,
-						};
-						return await target[prop](repairedData, signal);
+						return await target.sendRichMessageDraft({
+							chat_id: data.chat_id,
+							draft_id: data.draft_id,
+							rich_message: {
+								markdown: repairedText,
+							},
+							message_thread_id: data.message_thread_id,
+							business_connection_id: data.business_connection_id,
+						}, signal);
 					} catch (e: any) {
-						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
-							console.warn(`[OptimisticApi] ${prop} failed, retrying with smart escaped text. Error: ${e.description}`);
-							const escapedData = {
+						console.warn(`[OptimisticApi] sendRichMessageDraft failed, falling back to sendMessageDraft:`, e);
+						try {
+							return await target.sendMessageDraft({
 								...data,
-								text: smartSanitize(data.text),
+								text: repairedText,
 								parse_mode: 'MarkdownV2',
-							};
-							return await target[prop](escapedData, signal);
+							}, signal);
+						} catch (e2: any) {
+							if (e2.error_code === 400 && e2.description?.includes("can't parse entities")) {
+								return await target.sendMessageDraft({
+									...data,
+									text: smartSanitize(repairedText),
+									parse_mode: 'MarkdownV2',
+								}, signal);
+							}
+							throw e2;
 						}
-						throw e;
+					}
+				};
+			}
+
+			if (prop === 'sendMessage' || prop === 'sendRichMessage') {
+				return async (data: any, signal?: AbortSignal) => {
+					let text = data.text || data.rich_message?.markdown || '';
+					const repairedText = text ? repairMarkdownV2(text) : text;
+					try {
+						return await target.sendRichMessage({
+							chat_id: data.chat_id,
+							rich_message: {
+								markdown: repairedText,
+							},
+							message_thread_id: data.message_thread_id,
+							business_connection_id: data.business_connection_id,
+							reply_parameters: data.reply_parameters || (data.reply_to_message_id ? { message_id: data.reply_to_message_id } : undefined),
+						}, signal);
+					} catch (e: any) {
+						console.warn(`[OptimisticApi] sendRichMessage failed, falling back to sendMessage:`, e);
+						try {
+							return await target.sendMessage({
+								...data,
+								text: repairedText,
+								parse_mode: 'MarkdownV2',
+							}, signal);
+						} catch (e2: any) {
+							if (e2.error_code === 400 && e2.description?.includes("can't parse entities")) {
+								return await target.sendMessage({
+									...data,
+									text: smartSanitize(repairedText),
+									parse_mode: 'MarkdownV2',
+								}, signal);
+							}
+							throw e2;
+						}
 					}
 				};
 			}
