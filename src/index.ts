@@ -1,4 +1,5 @@
 import { Bot, Api, Context, webhookCallback, session, GrammyError, HttpError, InputFile } from 'grammy';
+import { autoRetry } from '@grammyjs/auto-retry';
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
 import { stream, type StreamFlavor } from '@grammyjs/stream';
 import { Hono } from 'hono';
@@ -30,6 +31,15 @@ type BaseContext = CommandsFlavor &
 type MyContext = StreamFlavor<BaseContext & ConversationFlavor<BaseContext>>;
 
 type MyConversation = Conversation<MyContext, MyContext>;
+
+export function createBotInstance(token: string): Bot<MyContext> {
+	const bot = new Bot<MyContext>(token);
+	bot.api.config.use(autoRetry({
+		maxRetryAttempts: 3,
+		maxDelaySeconds: 60,
+	}));
+	return bot;
+}
 
 async function getBusinessOwnerData(
 	api: Api,
@@ -443,30 +453,16 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
+	bot.api.config.use(autoRetry({
+		maxRetryAttempts: 3,
+		maxDelaySeconds: 60,
+	}));
+
 	bot.api.config.use(async (prev, method, payload, signal) => {
 		console.log(`[Grammy-API] Request: ${method}, Payload:`, JSON.stringify(payload));
-		let attempt = 0;
-		const maxAttempts = 3;
-		let delay = 1000;
-		while (true) {
-			try {
-				const res = await prev(method, payload, signal);
-				console.log(`[Grammy-API] Success: ${method}`);
-				return res;
-			} catch (e: any) {
-				attempt++;
-				const isRateLimit = e?.error_code === 429 || e?.status === 429 || String(e).includes('429');
-				if (isRateLimit && attempt < maxAttempts) {
-					const retryAfter = e?.parameters?.retry_after || (delay / 1000);
-					console.warn(`[Grammy-API] 429 Rate limited on ${method}. Retrying in ${retryAfter}s. Attempt ${attempt}/${maxAttempts}`);
-					await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
-					delay *= 2;
-				} else {
-					console.error(`[Grammy-API] Error in ${method} on attempt ${attempt}:`, e);
-					throw e;
-				}
-			}
-		}
+		const res = await prev(method, payload, signal);
+		console.log(`[Grammy-API] Success: ${method}`);
+		return res;
 	});
 
 	bot.use(stream());
@@ -839,28 +835,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 		if (!token) {
 			throw new Error('SECRET_TELEGRAM_API_TOKEN is empty in processTask');
 		}
-		const botInstance = new Bot<MyContext>(token);
-		botInstance.api.config.use(async (prev, method, payload, signal) => {
-			let attempt = 0;
-			const maxAttempts = 3;
-			let delay = 1000;
-			while (true) {
-				try {
-					return await prev(method, payload, signal);
-				} catch (e: any) {
-					attempt++;
-					const isRateLimit = e?.error_code === 429 || e?.status === 429 || String(e).includes('429');
-					if (isRateLimit && attempt < maxAttempts) {
-						const retryAfter = e?.parameters?.retry_after || (delay / 1000);
-						console.warn(`[processTask-API] 429 Rate limited on ${method}. Retrying in ${retryAfter}s. Attempt ${attempt}/${maxAttempts}`);
-						await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
-						delay *= 2;
-					} else {
-						throw e;
-					}
-				}
-			}
-		});
+		const botInstance = createBotInstance(token);
 
 		if (task.type === 'voice' && task.fileId) {
 			try {
@@ -1107,7 +1082,7 @@ app.post('/workflow', async (c) => {
 	const userMessage: ChatMessage = { role: 'user', content: task.prompt };
 	if (task.type === 'photo' && task.fileId) {
 		try {
-			const api = new Bot<MyContext>(c.env.SECRET_TELEGRAM_API_TOKEN).api;
+			const api = createBotInstance(c.env.SECRET_TELEGRAM_API_TOKEN).api;
 			const file = await api.getFile(task.fileId);
 			if (file.file_path) {
 				const fileUrl = `https://api.telegram.org/file/bot${c.env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
@@ -1159,7 +1134,7 @@ app.post('/workflow', async (c) => {
 	if (isSandboxEnabled) {
 		tools.push(createSandboxTool(c.env, c.env.Sandbox as any, String(task.userId)) as unknown as Tool);
 		tools.push(createTelegramFileReaderTool(c.env, c.env.Sandbox as any, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8') as unknown as Tool);
-		tools.push(createCodeWorkspaceTool(c.env, c.env.Sandbox as any, String(task.userId), new Bot<MyContext>(c.env.SECRET_TELEGRAM_API_TOKEN).api, task) as unknown as Tool);
+		tools.push(createCodeWorkspaceTool(c.env, c.env.Sandbox as any, String(task.userId), createBotInstance(c.env.SECRET_TELEGRAM_API_TOKEN).api, task) as unknown as Tool);
 	}
 
 	tools.push(createTelegramFileSearchTool(c.env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8') as unknown as Tool);
@@ -1200,7 +1175,7 @@ app.all('*', async (c) => {
 	if (method === 'GET' && c.req.query('command') === 'set') {
 		const token = c.env.SECRET_TELEGRAM_API_TOKEN;
 		const webhookUrl = `${url.origin}${url.pathname}`;
-		const api = new Bot<MyContext>(token).api;
+		const api = createBotInstance(token).api;
 
 		try {
 			const result = await api.setWebhook(webhookUrl, {
@@ -1229,7 +1204,7 @@ app.all('*', async (c) => {
 			console.error('[Fetch] SECRET_TELEGRAM_API_TOKEN is empty or undefined!');
 			return c.text('Error: SECRET_TELEGRAM_API_TOKEN is missing', 500);
 		}
-		const bot = new Bot<MyContext>(token);
+		const bot = createBotInstance(token);
 		setupBot(bot, c.env, c.executionCtx);
 
 		const clone = c.req.raw.clone();

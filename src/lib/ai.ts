@@ -1,4 +1,5 @@
 import type { Api } from 'grammy';
+import { autoRetry, type AutoRetryOptions } from '@grammyjs/auto-retry';
 import { streamApi, type StreamContextExtension } from '@grammyjs/stream';
 import {
 	markdownToMarkdownV2,
@@ -411,7 +412,10 @@ export async function customRunWithTools(
 	return finalResponse as AiResponse;
 }
 
-export async function sendMessageDraft(api: Api, data: Record<string, any>) {
+export async function sendMessageDraft(api: Api, data: Record<string, any>, options?: Partial<AutoRetryOptions>) {
+	if (api?.config?.use) {
+		api.config.use(autoRetry(options));
+	}
 	const textLen = typeof data.text === 'string' ? data.text.length : 0;
 	const payload: any = {
 		chat_id: data.chat_id,
