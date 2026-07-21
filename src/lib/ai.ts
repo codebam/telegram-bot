@@ -38,6 +38,10 @@ export function createThinkFilter() {
 			let current = buffer + chunk;
 			buffer = '';
 
+			if (!inside && !current.includes('<')) {
+				return flush(current);
+			}
+
 			while (current.length > 0) {
 				if (inside) {
 					const closeMatch = current.match(/<\/([a-z]+)>/i);
@@ -410,6 +414,11 @@ export async function sendMessageDraft(api: Api, data: Record<string, any>, retr
 	const textLen = typeof data.text === 'string' ? data.text.length : 0;
 	for (let i = 0; i < retries; i++) {
 		try {
+			if (typeof (api.raw as any).sendRichMessageDraft === 'function') {
+				await (api.raw as any).sendRichMessageDraft(data);
+				console.log(`[sendRichMessageDraft] Success. Len: ${textLen}`);
+				return;
+			}
 			await (api.raw as any).sendMessageDraft(data);
 			console.log(`[sendMessageDraft] Success. Len: ${textLen}`);
 			return;
@@ -630,7 +639,7 @@ function formatTelegramMessage(
 ): { text: string; parse_mode: 'MarkdownV2' } {
 	const formatBlock = (label: string, text?: string) => {
 		if (!text || !text.trim()) return '';
-		return `> *${label}*\n> ${text.trim().split('\n').join('\n> ')}\n\n`;
+		return `**> *${label}*\n> ${text.trim().split('\n').join('\n> ')}\n\n`;
 	};
 
 	let message = '';
@@ -660,7 +669,7 @@ function createOptimisticApi(raw: any): any {
 
 	return new Proxy(raw, {
 		get(target, prop, receiver) {
-			if (prop === 'sendMessageDraft' || prop === 'sendMessage') {
+			if (prop === 'sendMessageDraft' || prop === 'sendMessage' || prop === 'sendRichMessageDraft' || prop === 'sendRichMessage') {
 				return async (data: any, signal?: AbortSignal) => {
 					try {
 						let text = data.text;
@@ -765,7 +774,9 @@ export function repairMarkdownV2(text: string): string {
 		}
 
 		// Standard tokens
-		if (text.startsWith('```', i)) {
+		if (text.startsWith('**>', i)) {
+			i += 3;
+		} else if (text.startsWith('```', i)) {
 			stack.push('codeblock');
 			i += 3;
 		} else if (char === '`') {

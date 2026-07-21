@@ -5,9 +5,10 @@ import { Hono } from 'hono';
 
 import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
+// @ts-ignore
 import { KvAdapter } from '@grammyjs/storage-cloudflare';
 import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
-import { HistoryManager, getBalance, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, verifyTelegramWebAppData, verifyTelegramLogin, logTransaction, type Task, type Environment, type GeminiPart, type ChatMessage } from '@codebam/shared';
+import { HistoryManager, getBalance, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, verifyTelegramWebAppData, verifyTelegramLogin, logTransaction, type Task, type Environment, type GeminiPart, type ChatMessage, type Tool } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool, createCodeWorkspaceTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
@@ -948,7 +949,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 						}
 					];
 					try {
-						const sandbox = getSandbox(env.Sandbox, String(task.userId));
+						const sandbox = getSandbox(env.Sandbox as any, String(task.userId));
 						await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
 						console.log(`[processTask] Proactively wrote uploaded_image.png to sandbox.`);
 					} catch (se) {
@@ -980,10 +981,10 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 				fetchTool,
 				wikipediaTool,
 				createTavilySearchTool(env.TAVILY_API_KEY || ''),
-				createSandboxTool(env, env.Sandbox, String(task.userId)),
-				createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, modelId),
-				createTelegramFileSearchTool(env, String(task.userId), modelId),
-				createCodeWorkspaceTool(env, env.Sandbox, String(task.userId), botInstance.api, task),
+				createSandboxTool(env, env.Sandbox as any, String(task.userId)) as unknown as Tool,
+				createTelegramFileReaderTool(env, env.Sandbox as any, String(task.userId), messages, modelId) as unknown as Tool,
+				createTelegramFileSearchTool(env, String(task.userId), modelId) as unknown as Tool,
+				createCodeWorkspaceTool(env, env.Sandbox as any, String(task.userId), botInstance.api, task) as unknown as Tool,
 			],
 		);
 
@@ -1124,7 +1125,7 @@ app.post('/workflow', async (c) => {
 						}
 					];
 					try {
-						const sandbox = getSandbox(c.env.Sandbox, String(task.userId));
+						const sandbox = getSandbox(c.env.Sandbox as any, String(task.userId));
 						await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
 						console.log(`[Fetch] Proactively wrote uploaded_image.png to sandbox.`);
 					} catch (se) {
@@ -1146,22 +1147,22 @@ app.post('/workflow', async (c) => {
 	const isTavilyEnabled = await c.env.FLAGS?.getBooleanValue("tavily-search", false, { userId: String(task.userId) }) ?? false;
 	const isSandboxEnabled = await c.env.FLAGS?.getBooleanValue("code-sandbox", false, { userId: String(task.userId) }) ?? false;
 
-	const tools = [
-		fetchTool,
-		wikipediaTool,
+	const tools: Tool[] = [
+		fetchTool as unknown as Tool,
+		wikipediaTool as unknown as Tool,
 	];
 
 	if (isTavilyEnabled) {
-		tools.push(createTavilySearchTool(c.env.TAVILY_API_KEY || ''));
+		tools.push(createTavilySearchTool(c.env.TAVILY_API_KEY || '') as unknown as Tool);
 	}
 
 	if (isSandboxEnabled) {
-		tools.push(createSandboxTool(c.env, c.env.Sandbox, String(task.userId)));
-		tools.push(createTelegramFileReaderTool(c.env, c.env.Sandbox, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'));
-		tools.push(createCodeWorkspaceTool(c.env, c.env.Sandbox, String(task.userId), new Bot<MyContext>(c.env.SECRET_TELEGRAM_API_TOKEN).api, task));
+		tools.push(createSandboxTool(c.env, c.env.Sandbox as any, String(task.userId)) as unknown as Tool);
+		tools.push(createTelegramFileReaderTool(c.env, c.env.Sandbox as any, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8') as unknown as Tool);
+		tools.push(createCodeWorkspaceTool(c.env, c.env.Sandbox as any, String(task.userId), new Bot<MyContext>(c.env.SECRET_TELEGRAM_API_TOKEN).api, task) as unknown as Tool);
 	}
 
-	tools.push(createTelegramFileSearchTool(c.env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8'));
+	tools.push(createTelegramFileSearchTool(c.env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8') as unknown as Tool);
 
 	const aiResponse = await customRunWithTools(
 		c.env.AI,

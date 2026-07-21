@@ -132,7 +132,7 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 
 export async function syncUserSandboxWorkspace(userId: string, env: Environment): Promise<void> {
 	try {
-		const sandbox = getSandbox(env.Sandbox, userId);
+		const sandbox = getSandbox(env.Sandbox as any, userId);
 		const uploadsList = await env.R2.list({ prefix: `uploads/${userId}/` });
 		const activeFileNames: string[] = [];
 
