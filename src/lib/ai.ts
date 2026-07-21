@@ -2,6 +2,7 @@ import type { Api } from 'grammy';
 import { streamApi, type StreamContextExtension } from '@grammyjs/stream';
 import {
 	markdownToMarkdownV2,
+	convertMarkdownTablesToAscii,
 	AVAILABLE_MODELS,
 	extractText,
 	extractThinking,
@@ -647,7 +648,7 @@ function formatTelegramMessage(
 	message += formatBlock('Reasoning', reasoning);
 
 	if (content && content.trim()) {
-		message += content.trim();
+		message += convertMarkdownTablesToAscii(content.trim());
 	}
 
 	return { text: message.trim().slice(0, 4095), parse_mode: 'MarkdownV2' };
