@@ -3,7 +3,6 @@ import { streamApi, type StreamContextExtension } from '@grammyjs/stream';
 import {
 	markdownToMarkdownV2,
 	convertMarkdownTablesToAscii,
-	markdownToRichBlocks,
 	AVAILABLE_MODELS,
 	extractText,
 	extractThinking,
@@ -414,18 +413,12 @@ export async function customRunWithTools(
 
 export async function sendMessageDraft(api: Api, data: Record<string, any>) {
 	const textLen = typeof data.text === 'string' ? data.text.length : 0;
-	const payload: any = {
-		chat_id: data.chat_id,
-		draft_id: data.draft_id,
-		rich_message: {
-			blocks: markdownToRichBlocks(data.text || ''),
-			markdown: data.text,
-		},
-		message_thread_id: data.message_thread_id,
-		business_connection_id: data.business_connection_id,
-	};
-	await (api.raw as any).sendRichMessageDraft(payload);
-	console.log(`[sendRichMessageDraft] Success. Len: ${textLen}`);
+	try {
+		await (api.raw as any).sendMessageDraft(data);
+		console.log(`[sendMessageDraft] Success. Len: ${textLen}`);
+	} catch (e: any) {
+		console.error(`[sendMessageDraft] Failed. Len: ${textLen}, Error:`, e);
+	}
 }
 
 export interface StreamChunk {
@@ -659,37 +652,30 @@ function createOptimisticApi(raw: any): any {
 
 	return new Proxy(raw, {
 		get(target, prop, receiver) {
-			if (prop === 'sendMessageDraft' || prop === 'sendRichMessageDraft') {
+			if (prop === 'sendMessageDraft' || prop === 'sendMessage') {
 				return async (data: any, signal?: AbortSignal) => {
-					let rawText = data.text || data.rich_message?.markdown || '';
-					const blocks = markdownToRichBlocks(rawText);
-					return await target.sendRichMessageDraft({
-						chat_id: data.chat_id,
-						draft_id: data.draft_id,
-						rich_message: {
-							blocks: blocks,
-							markdown: rawText,
-						},
-						message_thread_id: data.message_thread_id,
-						business_connection_id: data.business_connection_id,
-					}, signal);
-				};
-			}
-
-			if (prop === 'sendMessage' || prop === 'sendRichMessage') {
-				return async (data: any, signal?: AbortSignal) => {
-					let rawText = data.text || data.rich_message?.markdown || '';
-					const blocks = markdownToRichBlocks(rawText);
-					return await target.sendRichMessage({
-						chat_id: data.chat_id,
-						rich_message: {
-							blocks: blocks,
-							markdown: rawText,
-						},
-						message_thread_id: data.message_thread_id,
-						business_connection_id: data.business_connection_id,
-						reply_parameters: data.reply_parameters || (data.reply_to_message_id ? { message_id: data.reply_to_message_id } : undefined),
-					}, signal);
+					try {
+						let text = data.text;
+						if (prop === 'sendMessage' && text) {
+							text = await markdownToMarkdownV2(text);
+						}
+						const repairedData = {
+							...data,
+							text: text ? repairMarkdownV2(text) : text,
+						};
+						return await target[prop](repairedData, signal);
+					} catch (e: any) {
+						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
+							console.warn(`[OptimisticApi] ${prop} failed, retrying with smart escaped text. Error: ${e.description}`);
+							const escapedData = {
+								...data,
+								text: smartSanitize(data.text),
+								parse_mode: 'MarkdownV2',
+							};
+							return await target[prop](escapedData, signal);
+						}
+						throw e;
+					}
 				};
 			}
 			if (prop === 'answerGuestQuery') {
