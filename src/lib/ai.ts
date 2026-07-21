@@ -2,7 +2,6 @@ import type { Api } from 'grammy';
 import { streamApi, type StreamContextExtension } from '@grammyjs/stream';
 import {
 	markdownToMarkdownV2,
-	convertMarkdownTablesToAscii,
 	AVAILABLE_MODELS,
 	extractText,
 	extractThinking,
@@ -416,7 +415,16 @@ export async function sendMessageDraft(api: Api, data: Record<string, any>, retr
 	for (let i = 0; i < retries; i++) {
 		try {
 			if (typeof (api.raw as any).sendRichMessageDraft === 'function') {
-				await (api.raw as any).sendRichMessageDraft(data);
+				const payload: any = {
+					chat_id: data.chat_id,
+					draft_id: data.draft_id,
+					rich_message: {
+						markdown: data.text,
+					},
+					message_thread_id: data.message_thread_id,
+					business_connection_id: data.business_connection_id,
+				};
+				await (api.raw as any).sendRichMessageDraft(payload);
 				console.log(`[sendRichMessageDraft] Success. Len: ${textLen}`);
 				return;
 			}
@@ -640,7 +648,7 @@ function formatTelegramMessage(
 ): { text: string; parse_mode: 'MarkdownV2' } {
 	const formatBlock = (label: string, text?: string) => {
 		if (!text || !text.trim()) return '';
-		return `**> *${label}*\n> ${text.trim().split('\n').join('\n> ')}\n\n`;
+		return `<details><summary>${label}</summary>\n${text.trim()}\n</details>\n\n`;
 	};
 
 	let message = '';
@@ -648,10 +656,10 @@ function formatTelegramMessage(
 	message += formatBlock('Reasoning', reasoning);
 
 	if (content && content.trim()) {
-		message += convertMarkdownTablesToAscii(content.trim());
+		message += content.trim();
 	}
 
-	return { text: message.trim().slice(0, 4095), parse_mode: 'MarkdownV2' };
+	return { text: message.trim().slice(0, 32000), parse_mode: 'MarkdownV2' };
 }
 
 /**
