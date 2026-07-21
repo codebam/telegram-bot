@@ -412,41 +412,20 @@ export async function customRunWithTools(
 	return finalResponse as AiResponse;
 }
 
-export async function sendMessageDraft(api: Api, data: Record<string, any>, retries = 3) {
+export async function sendMessageDraft(api: Api, data: Record<string, any>) {
 	const textLen = typeof data.text === 'string' ? data.text.length : 0;
-	for (let i = 0; i < retries; i++) {
-		try {
-			if (typeof (api.raw as any).sendRichMessageDraft === 'function') {
-				const payload: any = {
-					chat_id: data.chat_id,
-					draft_id: data.draft_id,
-					rich_message: {
-						markdown: data.text,
-					},
-					message_thread_id: data.message_thread_id,
-					business_connection_id: data.business_connection_id,
-				};
-				await (api.raw as any).sendRichMessageDraft(payload);
-				console.log(`[sendRichMessageDraft] Success. Len: ${textLen}`);
-				return;
-			}
-			await (api.raw as any).sendMessageDraft(data);
-			console.log(`[sendMessageDraft] Success. Len: ${textLen}`);
-			return;
-		} catch (e: any) {
-			console.error(`[sendMessageDraft] Attempt ${i + 1} Failed. Len: ${textLen}, Error:`, e);
-			if (e.error_code === 429) {
-				const retryAfter = (e.parameters?.retry_after || 1) * 1000;
-				await new Promise(resolve => setTimeout(resolve, retryAfter));
-				continue;
-			}
-			if (e.error_code >= 500) {
-				await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-				continue;
-			}
-			break;
-		}
-	}
+	const payload: any = {
+		chat_id: data.chat_id,
+		draft_id: data.draft_id,
+		rich_message: {
+			blocks: markdownToRichBlocks(data.text || ''),
+			markdown: data.text,
+		},
+		message_thread_id: data.message_thread_id,
+		business_connection_id: data.business_connection_id,
+	};
+	await (api.raw as any).sendRichMessageDraft(payload);
+	console.log(`[sendRichMessageDraft] Success. Len: ${textLen}`);
 }
 
 export interface StreamChunk {
@@ -684,37 +663,16 @@ function createOptimisticApi(raw: any): any {
 				return async (data: any, signal?: AbortSignal) => {
 					let rawText = data.text || data.rich_message?.markdown || '';
 					const blocks = markdownToRichBlocks(rawText);
-					try {
-						return await target.sendRichMessageDraft({
-							chat_id: data.chat_id,
-							draft_id: data.draft_id,
-							rich_message: {
-								blocks: blocks,
-								markdown: rawText,
-							},
-							message_thread_id: data.message_thread_id,
-							business_connection_id: data.business_connection_id,
-						}, signal);
-					} catch (e: any) {
-						console.warn(`[OptimisticApi] sendRichMessageDraft failed, falling back to sendMessageDraft:`, e);
-						const repairedText = rawText ? repairMarkdownV2(rawText) : rawText;
-						try {
-							return await target.sendMessageDraft({
-								...data,
-								text: repairedText,
-								parse_mode: 'MarkdownV2',
-							}, signal);
-						} catch (e2: any) {
-							if (e2.error_code === 400 && e2.description?.includes("can't parse entities")) {
-								return await target.sendMessageDraft({
-									...data,
-									text: smartSanitize(repairedText),
-									parse_mode: 'MarkdownV2',
-								}, signal);
-							}
-							throw e2;
-						}
-					}
+					return await target.sendRichMessageDraft({
+						chat_id: data.chat_id,
+						draft_id: data.draft_id,
+						rich_message: {
+							blocks: blocks,
+							markdown: rawText,
+						},
+						message_thread_id: data.message_thread_id,
+						business_connection_id: data.business_connection_id,
+					}, signal);
 				};
 			}
 
@@ -722,37 +680,16 @@ function createOptimisticApi(raw: any): any {
 				return async (data: any, signal?: AbortSignal) => {
 					let rawText = data.text || data.rich_message?.markdown || '';
 					const blocks = markdownToRichBlocks(rawText);
-					try {
-						return await target.sendRichMessage({
-							chat_id: data.chat_id,
-							rich_message: {
-								blocks: blocks,
-								markdown: rawText,
-							},
-							message_thread_id: data.message_thread_id,
-							business_connection_id: data.business_connection_id,
-							reply_parameters: data.reply_parameters || (data.reply_to_message_id ? { message_id: data.reply_to_message_id } : undefined),
-						}, signal);
-					} catch (e: any) {
-						console.warn(`[OptimisticApi] sendRichMessage failed, falling back to sendMessage:`, e);
-						const repairedText = rawText ? repairMarkdownV2(rawText) : rawText;
-						try {
-							return await target.sendMessage({
-								...data,
-								text: repairedText,
-								parse_mode: 'MarkdownV2',
-							}, signal);
-						} catch (e2: any) {
-							if (e2.error_code === 400 && e2.description?.includes("can't parse entities")) {
-								return await target.sendMessage({
-									...data,
-									text: smartSanitize(repairedText),
-									parse_mode: 'MarkdownV2',
-								}, signal);
-							}
-							throw e2;
-						}
-					}
+					return await target.sendRichMessage({
+						chat_id: data.chat_id,
+						rich_message: {
+							blocks: blocks,
+							markdown: rawText,
+						},
+						message_thread_id: data.message_thread_id,
+						business_connection_id: data.business_connection_id,
+						reply_parameters: data.reply_parameters || (data.reply_to_message_id ? { message_id: data.reply_to_message_id } : undefined),
+					}, signal);
 				};
 			}
 			if (prop === 'answerGuestQuery') {
