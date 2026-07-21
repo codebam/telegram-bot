@@ -3,6 +3,7 @@ import { streamApi, type StreamContextExtension } from '@grammyjs/stream';
 import {
 	markdownToMarkdownV2,
 	convertMarkdownTablesToAscii,
+	markdownToRichBlocks,
 	AVAILABLE_MODELS,
 	extractText,
 	extractThinking,
@@ -682,11 +683,13 @@ function createOptimisticApi(raw: any): any {
 			if (prop === 'sendMessageDraft' || prop === 'sendRichMessageDraft') {
 				return async (data: any, signal?: AbortSignal) => {
 					let rawText = data.text || data.rich_message?.markdown || '';
+					const blocks = markdownToRichBlocks(rawText);
 					try {
 						return await target.sendRichMessageDraft({
 							chat_id: data.chat_id,
 							draft_id: data.draft_id,
 							rich_message: {
+								blocks: blocks,
 								markdown: rawText,
 							},
 							message_thread_id: data.message_thread_id,
@@ -718,10 +721,12 @@ function createOptimisticApi(raw: any): any {
 			if (prop === 'sendMessage' || prop === 'sendRichMessage') {
 				return async (data: any, signal?: AbortSignal) => {
 					let rawText = data.text || data.rich_message?.markdown || '';
+					const blocks = markdownToRichBlocks(rawText);
 					try {
 						return await target.sendRichMessage({
 							chat_id: data.chat_id,
 							rich_message: {
+								blocks: blocks,
 								markdown: rawText,
 							},
 							message_thread_id: data.message_thread_id,
