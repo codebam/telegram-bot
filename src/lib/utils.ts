@@ -130,6 +130,15 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 	return Buffer.from(buffer).toString('base64');
 }
 
+/**
+ * Reject anything that is not a plain file name. Upload names are user
+ * supplied, so they must never be able to escape `/workspace` or inject
+ * themselves into generated code.
+ */
+export function isSafeFileName(name: string): boolean {
+	return /^[A-Za-z0-9._-]{1,128}$/.test(name) && name !== '.' && name !== '..';
+}
+
 export async function syncUserSandboxWorkspace(userId: string, env: Environment): Promise<void> {
 	try {
 		const sandbox = getSandbox(env.Sandbox as any, userId);
@@ -139,6 +148,10 @@ export async function syncUserSandboxWorkspace(userId: string, env: Environment)
 		if (uploadsList && uploadsList.objects.length > 0) {
 			for (const obj of uploadsList.objects) {
 				const fileName = obj.key.split('/').pop();
+				if (fileName && !isSafeFileName(fileName)) {
+					console.warn(`[SandboxSync] Skipping unsafe file name: ${fileName}`);
+					continue;
+				}
 				if (fileName) {
 					activeFileNames.push(fileName);
 					const cacheKey = `sandbox_sync:${userId}:${fileName}`;
@@ -159,12 +172,17 @@ export async function syncUserSandboxWorkspace(userId: string, env: Environment)
 			}
 		}
 
-		// Cleanup files in sandbox that are no longer in R2 uploads list
+		// Cleanup files in sandbox that are no longer in R2 uploads list.
+		// The allow-list is passed base64-encoded: interpolating the raw JSON into
+		// a Python string literal let a crafted upload name containing `"""` break
+		// out and execute arbitrary code in the sandbox.
+		const allowedB64 = Buffer.from(JSON.stringify(activeFileNames), 'utf8').toString('base64');
 		const pythonCleanupCode = `
 import os
 import json
+import base64
 
-allowed = json.loads("""${JSON.stringify(activeFileNames)}""")
+allowed = json.loads(base64.b64decode("${allowedB64}").decode("utf-8"))
 workspace_dir = "/workspace"
 
 if os.path.exists(workspace_dir):
@@ -226,6 +244,28 @@ import type { Api } from 'grammy';
 import { InputFile } from 'grammy';
 import type { Environment, Task } from '@codebam/shared';
 
+/**
+ * Resolve a model-supplied path inside `/workspace`, or return null if it tries
+ * to escape. The model is free to write code, but not to overwrite files
+ * elsewhere in the container image.
+ */
+export function normalizeWorkspacePath(input: string): string | null {
+	if (!input) return null;
+	const raw = input.startsWith('/') ? input : `/workspace/${input}`;
+	const segments: string[] = [];
+	for (const segment of raw.split('/')) {
+		if (!segment || segment === '.') continue;
+		if (segment === '..') {
+			if (segments.length === 0) return null;
+			segments.pop();
+			continue;
+		}
+		segments.push(segment);
+	}
+	const resolved = `/${segments.join('/')}`;
+	return resolved === '/workspace' || resolved.startsWith('/workspace/') ? resolved : null;
+}
+
 export const createCodeWorkspaceTool = (
 	env: Environment,
 	sandboxBinding: DurableObjectNamespace<Sandbox>,
@@ -267,12 +307,17 @@ export const createCodeWorkspaceTool = (
 				await syncUserSandboxWorkspace(userId, env);
 				const sandbox = getSandbox(sandboxBinding, userId);
 				
-				// 1. Write the files
+				// 1. Write the files, confined to the workspace directory
 				const writeResults = [];
 				for (const file of files) {
-					console.log(`[CodeWorkspace] Writing file to path: ${file.path}`);
-					await sandbox.writeFile(file.path, file.content);
-					writeResults.push(`Wrote ${file.path} (${file.content.length} chars)`);
+					const path = normalizeWorkspacePath(file.path);
+					if (!path) {
+						writeResults.push(`Refused ${file.path}: files must live under /workspace`);
+						continue;
+					}
+					console.log(`[CodeWorkspace] Writing file to path: ${path}`);
+					await sandbox.writeFile(path, file.content);
+					writeResults.push(`Wrote ${path} (${file.content.length} chars)`);
 				}
 
 				// 2. Execute verification command if provided
@@ -322,11 +367,14 @@ except Exception as e:
 
 				// 3. Retrieve output file and send to user via Telegram
 				let fileSentMsg = '';
-				if (output_file) {
-					console.log(`[CodeWorkspace] Reading output file: ${output_file}`);
-					const readRes = await sandbox.readFile(output_file, { encoding: 'base64' });
+				const outputPath = output_file ? normalizeWorkspacePath(output_file) : null;
+				if (output_file && !outputPath) {
+					fileSentMsg = `\nRefused to read ${output_file}: files must live under /workspace.`;
+				} else if (outputPath) {
+					console.log(`[CodeWorkspace] Reading output file: ${outputPath}`);
+					const readRes = await sandbox.readFile(outputPath, { encoding: 'base64' });
 					const contentBase64 = readRes.content;
-					const fileName = output_file.split('/').pop() || 'file';
+					const fileName = outputPath.split('/').pop() || 'file';
 
 					if (contentBase64) {
 						const sentKey = `sent_document:${task.updateId || 'none'}:${fileName}`;

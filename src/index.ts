@@ -1,45 +1,76 @@
-import { Bot, Api, Context, webhookCallback, session, GrammyError, HttpError, InputFile } from 'grammy';
+import { Bot, Api, Context, webhookCallback, GrammyError, HttpError, InputFile } from 'grammy';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
-import { stream, type StreamFlavor } from '@grammyjs/stream';
 import { Hono } from 'hono';
 
 import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
-import { conversations, createConversation, type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
-// @ts-ignore
-import { KvAdapter } from '@grammyjs/storage-cloudflare';
-import type { KVNamespace as CfKVNamespace } from '@cloudflare/workers-types';
-import { HistoryManager, getBalance, sanitizeMarkdownV2, SYSTEM_PROMPTS, AVAILABLE_MODELS, verifyTelegramWebAppData, verifyTelegramLogin, logTransaction, type Task, type Environment, type GeminiPart, type ChatMessage, type Tool } from '@codebam/shared';
+import {
+	HistoryManager,
+	sanitizeMarkdownV2,
+	SYSTEM_PROMPTS,
+	AVAILABLE_MODELS,
+	DEFAULT_MODEL,
+	MAX_HISTORY_MESSAGES,
+	PHOTO_COST_STARS,
+	VOICE_SURCHARGE_STARS,
+	modelConfigById,
+	verifyTelegramAuth,
+	type Task,
+	type Environment,
+	type ChatMessage,
+	type Tool
+} from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool, createCodeWorkspaceTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
 import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
+import { accountBalance, accountCharge, accountCredit } from './lib/account.js';
 
 import { getSandbox } from '@cloudflare/sandbox';
 export { Sandbox } from '@cloudflare/sandbox';
+export { UserAccount } from './lib/account.js';
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
 	return Buffer.from(buffer).toString('base64');
 }
 
-type BaseContext = CommandsFlavor &
+/** Compare two secrets without leaking their contents through timing. */
+function secretsMatch(a: string | undefined | null, b: string | undefined | null): boolean {
+	if (!a || !b || a.length !== b.length) return false;
+	let diff = 0;
+	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	return diff === 0;
+}
+
+type MyContext = CommandsFlavor &
 	Context & {
 		env: Environment;
 		executionCtx: ExecutionContext;
-		session: Record<string, unknown>;
 	};
-
-type MyContext = StreamFlavor<BaseContext & ConversationFlavor<BaseContext>>;
-
-type MyConversation = Conversation<MyContext, MyContext>;
 
 export function createBotInstance(token: string): Bot<MyContext> {
 	const bot = new Bot<MyContext>(token);
-	bot.api.config.use(autoRetry({
-		maxRetryAttempts: 3,
-		maxDelaySeconds: 60,
-	}));
+	bot.api.config.use(
+		autoRetry({
+			maxRetryAttempts: 3,
+			maxDelaySeconds: 60,
+		}),
+	);
 	return bot;
 }
+
+const HELP_TEXT =
+	'Welcome! Here are my commands:\n' +
+	'/balance - Check your current Star balance\n' +
+	'/load <amount> - Top up your balance with Telegram Stars\n' +
+	`/photo <prompt> - Generate an image (${String(PHOTO_COST_STARS)} Stars)\n` +
+	'/model <name> - Switch AI model and see costs\n' +
+	'/prompt ["prompt"] - Set your custom system prompt (no args to view, "" or reset to clear)\n' +
+	'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
+	'<prompt> - Generate text (may use tools if supported by model)\n' +
+	`Send a voice note - Transform your bot into a voice assistant (+${String(VOICE_SURCHARGE_STARS)} Stars)\n` +
+	'/clear - Clear your conversation history\n' +
+	'/commit - Get the latest deployed commit link\n\n' +
+	'New users start with 200 free credits!';
 
 async function getBusinessOwnerData(
 	api: Api,
@@ -51,9 +82,9 @@ async function getBusinessOwnerData(
 		'json'
 	);
 	if (ownerData) {
-		console.log(`[getBusinessOwnerData] Cache HIT for connection ${connectionId}:`, JSON.stringify(ownerData));
+		console.log(`[getBusinessOwnerData] Cache HIT for connection ${connectionId}`);
 	} else {
-		console.log(`[getBusinessOwnerData] Cache MISS or stale entry for connection ${connectionId}. Fetching from Telegram API...`);
+		console.log(`[getBusinessOwnerData] Cache MISS for connection ${connectionId}. Fetching from Telegram API...`);
 		try {
 			const result = await api.getBusinessConnection(connectionId);
 			const id = result.user?.id || result.user_chat_id;
@@ -61,15 +92,9 @@ async function getBusinessOwnerData(
 			const username = result.user?.username;
 			if (id) {
 				ownerData = { id, name, username };
-				console.log(`[getBusinessOwnerData] Successfully resolved owner: id=${id}, name=${name}, username=${username ?? ''}. Caching in KV...`);
-				await env.CONVERSATION_HISTORY.put(
-					`active_connection:${id}`,
-					connectionId
-				);
-				await env.CONVERSATION_HISTORY.put(
-					`business_connection:${connectionId}`,
-					JSON.stringify(ownerData)
-				);
+				console.log(`[getBusinessOwnerData] Resolved owner id=${id}. Caching in KV...`);
+				await env.CONVERSATION_HISTORY.put(`active_connection:${id}`, connectionId);
+				await env.CONVERSATION_HISTORY.put(`business_connection:${connectionId}`, JSON.stringify(ownerData));
 			} else {
 				console.error(`[getBusinessOwnerData] Failed to resolve owner ID from result:`, JSON.stringify(result));
 			}
@@ -80,39 +105,106 @@ async function getBusinessOwnerData(
 	return ownerData;
 }
 
-async function chargeStars(
-	ctx: MyContext,
-	task: Task,
-	amountOverride?: number
-) {
-	const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
-	let userId: number | string | undefined = ctx.from?.id;
-	let billingUserId = ctx.from?.id;
+/**
+ * Fold the document / reply-to context that the user implicitly provided into
+ * the prompt text.
+ */
+function buildPrompt(ctx: MyContext): string {
+	let prompt = ctx.msg?.text || ctx.msg?.caption || '';
+
+	const doc = ctx.msg?.document;
+	if (doc) {
+		prompt = `[Uploaded Document: Name="${doc.file_name || 'document'}", MIME="${doc.mime_type || ''}", FileID="${doc.file_id}"]\n\n${prompt || 'Please process this document.'}`;
+	}
+
+	const replyToMessage = ctx.msg?.reply_to_message;
+	if (replyToMessage) {
+		if (replyToMessage.document) {
+			const replyDoc = replyToMessage.document;
+			const replyText = replyToMessage.caption || '';
+			prompt = `Context of the uploaded document I am replying to: Name="${replyDoc.file_name || 'document'}", MIME="${replyDoc.mime_type || ''}", FileID="${replyDoc.file_id}"${replyText ? ` with caption "${replyText}"` : ''}\n\nMy message: ${prompt}`;
+		} else {
+			const replyText = replyToMessage.text || replyToMessage.caption || '';
+			if (replyText) {
+				prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
+			}
+		}
+	}
+
+	return prompt;
+}
+
+/**
+ * Resolve who pays for this update.
+ *
+ * For business messages the *customer* owns the conversation history but the
+ * connected business owner is billed. Returns `null` for the billing id when we
+ * cannot determine it, so callers can bail instead of writing to a shared
+ * `balance:undefined` key.
+ */
+async function resolveIdentity(
+	ctx: MyContext
+): Promise<{ historyUserId: number | string; billingUserId: number | null }> {
+	const senderId = ctx.from?.id ?? ctx.update.guest_message?.from?.id ?? null;
+	let historyUserId: number | string = senderId ?? 0;
+	let billingUserId: number | null = senderId;
 
 	if (ctx.has('business_message')) {
 		const bizMsg = ctx.businessMessage;
 		const connectionId = bizMsg.business_connection_id;
 		const customerId = bizMsg.chat.id;
 		if (connectionId && customerId) {
-			userId = `business:${connectionId}:${customerId}`;
+			historyUserId = `business:${connectionId}:${customerId}`;
 			const ownerData = await getBusinessOwnerData(ctx.api, ctx.env, connectionId);
-			if (ownerData?.id) {
-				billingUserId = ownerData.id;
-			}
+			billingUserId = ownerData?.id ?? null;
 		}
 	}
 
-	if (ctx.update.guest_message) {
-		userId = userId || ctx.update.guest_message.from?.id;
-		billingUserId = billingUserId || ctx.update.guest_message.from?.id;
+	return { historyUserId, billingUserId };
+}
+
+async function resolveSystemPrompt(ctx: MyContext, billingUserId: number): Promise<string> {
+	if (ctx.has('business_message')) {
+		let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
+		const connectionId = ctx.businessMessage.business_connection_id;
+		if (connectionId) {
+			const ownerData = await getBusinessOwnerData(ctx.api, ctx.env, connectionId);
+			if (ownerData) {
+				const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${String(ownerData.id)}`);
+				if (customPrompt) prompt = customPrompt;
+				prompt = prompt.replace(/{owner_name}/g, ownerData.name);
+				const facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
+				if (facts) prompt += `\n\nHere are some facts about you:\n${facts}`;
+			}
+		}
+		return prompt;
 	}
 
-	if (!userId || userId === ctx.me.id) {
-		console.log(`Skipping chargeStars: userId=${userId}, botId=${ctx.me.id}`);
+	const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${String(billingUserId)}`);
+	const base = customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
+	const isFileTask = !!ctx.msg?.document || !!ctx.msg?.reply_to_message?.document;
+	if (isFileTask) {
+		return `${base}\n\nEnsure your responses are formatted using supported Telegram MarkdownV2.`;
+	}
+	return base;
+}
+
+/**
+ * Price, bill and enqueue a task.
+ *
+ * Billing goes through the `UserAccount` durable object so that two messages
+ * arriving at once cannot both spend the same Stars.
+ */
+async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) {
+	const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
+	const { historyUserId, billingUserId } = await resolveIdentity(ctx);
+
+	if (!billingUserId || billingUserId === ctx.me.id) {
+		console.log(`[chargeStars] Skipping: billingUserId=${String(billingUserId)}, botId=${ctx.me.id}`);
 		return;
 	}
 
-	task.userId = userId;
+	task.userId = historyUserId;
 	task.senderId = ctx.from?.id || ctx.update.guest_message?.from?.id;
 	task.chatId = ctx.chatId?.toString() || ctx.update.guest_message?.chat?.id?.toString();
 	task.updateId = ctx.update.update_id;
@@ -121,319 +213,95 @@ async function chargeStars(
 	task.guestQueryId = ctx.update.guest_message?.guest_query_id;
 	task.businessConnectionId = ctx.businessMessage?.business_connection_id?.toString();
 	task.threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
-	
+
 	if (ctx.update.update_id) {
 		const processedKey = `processed_update:${String(ctx.update.update_id)}`;
-		const alreadyProcessed = await ctx.env.CONVERSATION_HISTORY.get(processedKey);
-		if (alreadyProcessed) {
+		if (await ctx.env.CONVERSATION_HISTORY.get(processedKey)) {
 			console.log(`[chargeStars] Update ${ctx.update.update_id} already processed. Skipping duplicate workflow.`);
 			return;
 		}
 	}
-	
-	const balanceKey = `balance:${String(billingUserId)}`;
-	const balance = await getBalance(billingUserId || 0, ctx.env.CONVERSATION_HISTORY);
 
-	const defaultModel = await ctx.env.FLAGS?.getStringValue("default-model", "glm-4.7-flash", { userId: String(billingUserId) }) ?? "glm-4.7-flash";
+	const defaultModel =
+		(await ctx.env.FLAGS?.getStringValue('default-model', DEFAULT_MODEL, { userId: String(billingUserId) })) ??
+		DEFAULT_MODEL;
 	const modelPreference =
 		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? defaultModel;
-	const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['glm-4.7-flash'];
+	const preferred = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS[DEFAULT_MODEL];
 
-	if (task.type === 'tool_call' && !modelConfig.supportsTools) {
-		task.modelId = AVAILABLE_MODELS[defaultModel]?.id ?? AVAILABLE_MODELS['glm-4.7-flash'].id;
-	} else if ((task.type === 'photo' || task.geminiParts?.some((p) => p.inlineData)) && !modelConfig.supportsVision) {
-		task.modelId = AVAILABLE_MODELS['google/gemini-3.1-flash-lite'].id;
-	} else {
-		task.modelId = modelConfig.id;
+	// Fall back to a capable model when the preference cannot handle the task,
+	// and price the request against whatever model actually runs.
+	let effective = preferred;
+	if (task.type === 'tool_call' && !preferred.supportsTools) {
+		effective = AVAILABLE_MODELS[defaultModel] ?? AVAILABLE_MODELS[DEFAULT_MODEL];
+	} else if ((task.type === 'photo' || task.geminiParts?.some((p) => p.inlineData)) && !preferred.supportsVision) {
+		effective = AVAILABLE_MODELS['google/gemini-3.1-flash-lite'];
 	}
+	task.modelId = effective.id;
 
-	const amount = amountOverride ?? modelConfig.cost;
+	const amount = amountOverride ?? effective.cost + (task.type === 'voice' ? VOICE_SURCHARGE_STARS : 0);
 
-	if (balance >= amount) {
-		try {
-			await ctx.replyWithChatAction('typing', {
-				business_connection_id: ctx.businessMessage?.business_connection_id,
-			});
-		} catch (e) {
-			console.log('[chargeStars] Failed to send chat action (likely not a member):', e);
-		}
-		const newBalance = balance - amount;
-		await ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(newBalance));
-		await logTransaction(billingUserId || 0, ctx.env.CONVERSATION_HISTORY, {
-			amount,
-			type: 'charge',
-			model: task.modelId,
-			taskType: task.type,
-			newBalance,
-			description: 'AI Bot message charge'
-		});
-		task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
+	const charge = await accountCharge(ctx.env, billingUserId, amount, {
+		model: task.modelId,
+		taskType: task.type,
+		description: 'AI Bot message charge',
+	});
 
-		if (ctx.has('business_message')) {
-			if (!task.systemPrompt) {
-				let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
-				const connectionId = ctx.businessMessage.business_connection_id;
-				if (connectionId) {
-					const ownerData = await getBusinessOwnerData(ctx.api, ctx.env, connectionId);
-					if (ownerData) {
-						const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${String(ownerData.id)}`);
-						if (customPrompt) {
-							prompt = customPrompt;
-						}
-						prompt = prompt.replace(/{owner_name}/g, ownerData.name);
-						const facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
-						if (facts) {
-							prompt += `\n\nHere are some facts about you:\n${facts}`;
-						}
-					}
-				}
-				task.systemPrompt = prompt;
-			}
-		} else {
-			const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
-			if (customPrompt) {
-				task.systemPrompt = customPrompt;
-			} else if (!task.systemPrompt) {
-				task.systemPrompt = SYSTEM_PROMPTS.TUX_ROBOT;
-			}
-		}
-
-		if (!task.history && userId) {
-			task.history = await historyManager.getHistory(userId, task.threadId);
-		}
-
-		await ctx.env.STREAM_WORKFLOW.create({
-			params: task,
-		});
-	} else {
+	if (!charge.ok) {
 		if (ctx.has('business_message') || ctx.has('guest_message')) {
-			await ctx.reply(
-				'Insufficient balance. Please go to direct messages and use /load to top up your Stars.',
-				{
-					business_connection_id: ctx.businessMessage?.business_connection_id,
-					reply_parameters: { message_id: ctx.msgId },
-				}
-			);
+			await ctx.reply('Insufficient balance. Please go to direct messages and use /load to top up your Stars.', {
+				business_connection_id: ctx.businessMessage?.business_connection_id,
+				reply_parameters: { message_id: ctx.msgId },
+			});
 		} else {
 			const taskId = crypto.randomUUID();
-			await ctx.env.CONVERSATION_HISTORY.put(`task:${taskId}`, JSON.stringify(task), {
-				expirationTtl: 3600
-			});
-			await ctx.replyWithInvoice(
-				'AI Generation',
-				'Charge for AI message generation',
-				taskId,
-				'XTR',
-				[{ label: 'Stars', amount }]
-			);
+			// Freeze everything the workflow will need: the entry expires in an
+			// hour and there is no second chance to resolve it after payment.
+			task.systemPrompt = task.systemPrompt ?? (await resolveSystemPrompt(ctx, billingUserId));
+			task.history = task.history ?? (await historyManager.getHistory(historyUserId, task.threadId));
+			await ctx.env.CONVERSATION_HISTORY.put(`task:${taskId}`, JSON.stringify(task), { expirationTtl: 3600 });
+			await ctx.replyWithInvoice('AI Generation', 'Charge for AI message generation', taskId, 'XTR', [
+				{ label: 'Stars', amount },
+			]);
 		}
+		return;
 	}
-}
 
-export function createChatConversation(env: Environment, executionCtx: ExecutionContext) {
-	return async function chatConversation(conversation: MyConversation, ctx: MyContext) {
-		ctx.env = env;
-		ctx.executionCtx = executionCtx;
-		let userId: number | string = ctx.from!.id;
-		const threadId = ctx.msg?.message_thread_id;
+	task.chargedAmount = amount;
+	task.billingUserId = billingUserId;
 
-		if (ctx.has('business_message')) {
-			const bizMsg = ctx.businessMessage;
-			const connectionId = bizMsg.business_connection_id;
-			const customerId = bizMsg.chat.id;
-			if (connectionId && customerId) {
-				userId = `business:${connectionId}:${customerId}`;
-			}
-		}
+	try {
+		await ctx.replyWithChatAction('typing', {
+			business_connection_id: ctx.businessMessage?.business_connection_id,
+		});
+	} catch (e) {
+		console.log('[chargeStars] Failed to send chat action (likely not a member):', e);
+	}
 
-		while (true) {
-			// Initialize history from KV if it exists, otherwise start fresh
-			const history = (await conversation.external(async () => {
-				const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
-				return await historyManager.getHistory(userId, threadId);
-			})) || [];
+	task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
+	if (!task.systemPrompt) {
+		task.systemPrompt = await resolveSystemPrompt(ctx, billingUserId);
+	}
+	if (!task.history) {
+		task.history = await historyManager.getHistory(historyUserId, task.threadId);
+	}
 
-			let prompt = ctx.msg?.text || ctx.msg?.caption || '';
-
-			const geminiParts: GeminiPart[] = [];
-			const photo = ctx.msg?.photo;
-			if (photo) {
-				const largestPhoto = photo[photo.length - 1];
-				const file = await conversation.external(() => ctx.api.getFile(largestPhoto.file_id));
-				const fileUrl = `https://api.telegram.org/file/bot${env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
-				const base64Data = await conversation.external(async () => {
-					const fileRes = await fetch(fileUrl);
-					if (fileRes.ok) {
-						const arrayBuffer = await fileRes.arrayBuffer();
-						return arrayBufferToBase64(arrayBuffer);
-					}
-					return null;
-				});
-				if (base64Data) {
-					geminiParts.push({
-						inlineData: {
-							mimeType: 'image/jpeg',
-							data: base64Data
-						}
-					});
-				}
-				if (!prompt) {
-					prompt = 'Please describe this image';
-				}
-			}
-
-			let billingUserId = ctx.from?.id;
-			let ownerData: { id: number; name: string; username?: string } | null = null;
-			if (ctx.has('business_message')) {
-				const connectionId = ctx.businessMessage.business_connection_id;
-				if (connectionId) {
-					ownerData = await conversation.external(() => getBusinessOwnerData(ctx.api, env, connectionId));
-					if (ownerData?.id) {
-						billingUserId = ownerData.id;
-					}
-				}
-			}
-
-			const { balance, modelPreference } = await conversation.external(async () => {
-				const b = await getBalance(billingUserId || 0, env.CONVERSATION_HISTORY);
-				const defaultModel = await env.FLAGS?.getStringValue("default-model", "glm-4.7-flash", { userId: String(billingUserId) }) ?? "glm-4.7-flash";
-				const mp = (await env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? defaultModel;
-				return { balance: b, modelPreference: mp };
-			});
-
-			const modelConfig = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS['glm-4.7-flash'];
-
-			if (ctx.msg?.document) {
-				const doc = ctx.msg.document;
-				prompt = `[Uploaded Document: Name="${doc.file_name || 'document'}", MIME="${doc.mime_type || ''}", FileID="${doc.file_id}"]\n\n${prompt || 'Please process this document.'}`;
-			}
-
-			const replyToMessage = ctx.msg?.reply_to_message;
-			if (replyToMessage) {
-				if (replyToMessage.document) {
-					const replyDoc = replyToMessage.document;
-					const replyText = replyToMessage.caption || '';
-					prompt = `Context of the uploaded document I am replying to: Name="${replyDoc.file_name || 'document'}", MIME="${replyDoc.mime_type || ''}", FileID="${replyDoc.file_id}"${replyText ? ` with caption "${replyText}"` : ''}\n\nMy message: ${prompt}`;
-				} else {
-					const replyText = replyToMessage.text || replyToMessage.caption || '';
-					if (replyText) {
-						prompt = `Context of the message I am replying to: "${replyText}"\n\nMy message: ${prompt}`;
-					}
-				}
-			}
-
-			if (prompt) {
-				if (geminiParts.some((p) => p.inlineData) && !modelConfig.supportsVision) {
-					await ctx.reply(
-						`⚠️ Your current model (*${sanitizeMarkdownV2(modelPreference)}*) does not support vision/images\\.\n\n` +
-							`Please switch to a vision\\-enabled model using:\n` +
-							`\\- \`/model kimi-k2.6\` \\(40 Stars\\)\n` +
-							`\\- \`/model gemma4\` \\(10 Stars\\)\n` +
-							`\\- \`/model google/gemini-3.1-flash-lite\` \\(10 Stars\\)\n` +
-							`\\- \`/model llama-3.2-vision\` \\(10 Stars\\)\n` +
-							`\\- \`/model google/gemini-3.1-pro\` \\(80 Stars\\)`,
-						{ parse_mode: 'MarkdownV2' }
-					);
-					ctx = await conversation.wait();
-					continue;
-				}
-
-				const amount = modelConfig.cost;
-
-				if (balance >= amount) {
-					try {
-						await ctx.replyWithChatAction('typing', {
-							business_connection_id: ctx.businessMessage?.business_connection_id,
-						});
-					} catch (e) {
-						console.error('[chatConversation] Failed to send chat action:', e);
-					}
-					const balanceKey = `balance:${String(billingUserId)}`;
-					const newBalance = balance - amount;
-					await conversation.external(async () => {
-						await env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(newBalance));
-						await logTransaction(billingUserId || 0, env.CONVERSATION_HISTORY, {
-							amount,
-							type: 'charge',
-							model: modelConfig.id,
-							taskType: ctx.has('business_message') ? 'business_message' : 'message',
-							newBalance,
-							description: 'AI Bot message charge'
-						});
-					});
-
-					const systemPrompt = await conversation.external(async () => {
-						if (ctx.has('business_message')) {
-							let prompt = SYSTEM_PROMPTS.BUSINESS_MODE;
-							if (ownerData) {
-								const customPrompt = await env.CONVERSATION_HISTORY.get(`prompt:${String(ownerData.id)}`);
-								if (customPrompt) {
-									prompt = customPrompt;
-								}
-								prompt = prompt.replace(/{owner_name}/g, ownerData.name);
-								const facts = await env.CONVERSATION_HISTORY.get(`business_facts:${String(ownerData.id)}`);
-								if (facts) {
-									prompt += `\n\nHere are some facts about you:\n${facts}`;
-								}
-							}
-							return prompt;
-						}
-						const isFileTask = !!ctx.msg?.document || !!(replyToMessage && replyToMessage.document);
-						const customPrompt = await env.CONVERSATION_HISTORY.get(`prompt:${String(userId)}`);
-						if (isFileTask) {
-							if (customPrompt) {
-								return customPrompt + '\n\nEnsure your responses are formatted using supported Telegram MarkdownV2.';
-							}
-							return 'You are a helpful assistant running on Telegram. Ensure your responses are formatted using supported Telegram MarkdownV2.';
-						}
-						return customPrompt || SYSTEM_PROMPTS.TUX_ROBOT;
-					});
-
-					const userMessage: ChatMessage = { role: 'user', content: prompt };
-					if (geminiParts.length > 0) {
-						userMessage.geminiParts = [
-							{ text: prompt || 'Please describe this image' },
-							...geminiParts
-						];
-					}
-
-					const modelId = modelConfig.id;
-
-					await conversation.external(async () => {
-						await ctx.env.STREAM_WORKFLOW.create({
-							params: {
-								type: ctx.has('business_message') ? 'business_message' : 'message',
-								updateType: ctx.has('business_message') ? 'business_message' : 'message',
-								prompt,
-								chatId: ctx.chatId?.toString(),
-								threadId,
-								businessConnectionId: ctx.businessMessage?.business_connection_id?.toString(),
-								messageId: ctx.msgId,
-								userId: String(userId),
-								systemPrompt,
-								history,
-								telegramToken: env.SECRET_TELEGRAM_API_TOKEN,
-								modelId,
-							},
-						});
-					});
-				} else {
-					// Handle insufficient balance (omitted full logic for brevity, can call ctx.replyWithInvoice)
-					await ctx.reply('Insufficient balance. Please top up your Stars.');
-					break;
-				}
-			}
-
-			ctx = (await conversation.wait()) as MyContext;
-			ctx.env = env;
-			ctx.executionCtx = executionCtx;
-		}
-	};
+	try {
+		await ctx.env.STREAM_WORKFLOW.create({ params: task });
+	} catch (e) {
+		console.error('[chargeStars] Failed to enqueue workflow, refunding:', e);
+		await accountCredit(ctx.env, billingUserId, amount, 'refund', {
+			model: task.modelId,
+			taskType: task.type,
+			description: 'Refund: could not start generation',
+		});
+		throw e;
+	}
 }
 
 function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionContext) {
 	bot.use(async (ctx, next) => {
-		const updateType = Object.keys(ctx.update).find(k => k !== 'update_id');
+		const updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
 		console.log(`[Grammy-Update] Received update: ${ctx.update.update_id}, Type: ${updateType}`);
 		ctx.env = env;
 		ctx.executionCtx = executionCtx;
@@ -453,62 +321,35 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
-	bot.api.config.use(autoRetry({
-		maxRetryAttempts: 3,
-		maxDelaySeconds: 60,
-	}));
-
+	// NOTE: autoRetry is installed once, in createBotInstance. Installing it a
+	// second time here stacked two retry transformers (up to 9 attempts).
 	bot.api.config.use(async (prev, method, payload, signal) => {
-		console.log(`[Grammy-API] Request: ${method}, Payload:`, JSON.stringify(payload));
+		console.log(`[Grammy-API] Request: ${method}`);
 		const res = await prev(method, payload, signal);
 		console.log(`[Grammy-API] Success: ${method}`);
 		return res;
 	});
 
-	bot.use(stream());
-
-	bot.use(
-		session({
-			initial: () => ({}),
-			storage: new KvAdapter(env.CONVERSATION_HISTORY as unknown as CfKVNamespace),
-		}),
-	);
-	bot.use(conversations());
-	bot.use(createConversation(createChatConversation(env, executionCtx), 'chatConversation'));
-
 	const commands = new CommandGroup<MyContext>();
 
 	commands.command('start', 'Welcome message and command list', async (ctx) => {
 		const isDev = ctx.env.ENVIRONMENT === 'dev';
-		const message = 'Welcome! Here are my commands:\n' +
-			'/balance - Check your current Star balance\n' +
-			'/load <amount> - Top up your balance with Telegram Stars\n' +
-			'/photo <prompt> - Generate an image (100 Stars)\n' +
-			'/model <name> - Switch AI model and see costs\n' +
-			'/prompt ["prompt"] - Set your custom system prompt (no args to view, "" or reset to clear)\n' +
-			'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
-			'<prompt> - Generate text (may use tools if supported by model)\n' +
-			'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
-			'/clear - Clear your conversation history\n' +
-			'/commit - Get the latest deployed commit link\n\n' +
-			'New users start with 200 free credits!' +
-			(isDev ? '' : '\n\nClick the button below to open the Web App!');
-
-		await ctx.reply(message, {
-			reply_markup: isDev ? undefined : {
-				inline_keyboard: [[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }]],
-			},
+		await ctx.reply(HELP_TEXT + (isDev ? '' : '\n\nClick the button below to open the Web App!'), {
+			reply_markup: isDev
+				? undefined
+				: { inline_keyboard: [[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }]] },
 		});
 	});
 
 	commands.command('balance', 'Check your current Star balance', async (ctx) => {
-		const balance = await getBalance(ctx.from?.id || 0, ctx.env.CONVERSATION_HISTORY);
+		if (!ctx.from?.id) return;
+		const balance = await accountBalance(ctx.env, ctx.from.id);
 		await ctx.reply(`Your current balance is ${String(balance)} Stars.`);
 	});
 
 	commands.command('load', 'Top up your balance with Telegram Stars', async (ctx) => {
-		const amount = parseInt(ctx.match || '0');
-		if (isNaN(amount) || amount <= 0 || amount > 1000) {
+		const amount = parseInt(ctx.match || '0', 10);
+		if (!Number.isInteger(amount) || amount <= 0 || amount > 1000) {
 			await ctx.reply('Please specify an amount between 1 and 1000 Stars. Example: /load 100');
 		} else {
 			await ctx.replyWithInvoice('Stars Top-up', `Purchase ${String(amount)} Stars`, `load:${String(amount)}`, 'XTR', [
@@ -520,7 +361,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	commands.command('photo', 'Generate an image', async (ctx) => {
 		const prompt = ctx.match;
 		if (prompt) {
-			await chargeStars(ctx, { type: 'gen_photo', prompt }, 100);
+			await chargeStars(ctx, { type: 'gen_photo', prompt }, PHOTO_COST_STARS);
 		} else {
 			await ctx.reply('Please provide a prompt for the photo. Example: /photo a futuristic city');
 		}
@@ -528,15 +369,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 
 	commands.command('clear', 'Clear your conversation history', async (ctx) => {
 		const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
-		let historyUserId: number | string = ctx.from?.id || 0;
-		if (ctx.update.business_message) {
-			const bizMsg = ctx.update.business_message;
-			const connectionId = bizMsg.business_connection_id;
-			const customerId = bizMsg.chat.id;
-			if (connectionId && customerId) {
-				historyUserId = `business:${connectionId}:${customerId}`;
-			}
-		}
+		const { historyUserId } = await resolveIdentity(ctx);
 		const threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
 		await historyManager.clearHistory(historyUserId, threadId);
 		await ctx.reply('History cleared');
@@ -550,10 +383,10 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 				await ctx.env.CONVERSATION_HISTORY.put(modelKey, selectedModel);
 				await ctx.reply(`Model updated to *${sanitizeMarkdownV2(selectedModel)}*\\.`, { parse_mode: 'MarkdownV2' });
 			} else {
-				await ctx.reply(`Invalid model\\. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
+				await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
 			}
 		} else {
-			const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? 'glm-4.7-flash';
+			const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? DEFAULT_MODEL;
 			await ctx.reply(
 				`Current model: *${sanitizeMarkdownV2(currentModel)}*\n\n` +
 					`Available models:\n` +
@@ -601,23 +434,24 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			return;
 		}
 
+		const syncAliases = async (value: string | null) => {
+			const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${String(userId)}`);
+			if (!connectionId) return;
+			const ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
+				`business_connection:${connectionId}`,
+				'json',
+			);
+			if (!ownerData) return;
+			for (const alias of [ownerData.username, ownerData.name]) {
+				if (!alias) continue;
+				if (value === null) await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${alias}`);
+				else await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${alias}`, value);
+			}
+		};
+
 		if (factsValue === 'reset' || factsValue === '""' || factsValue === "''") {
 			await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${String(userId)}`);
-			const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${userId}`);
-			if (connectionId) {
-				const ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
-					`business_connection:${connectionId}`,
-					'json',
-				);
-				if (ownerData) {
-					if (ownerData.username) {
-						await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${ownerData.username}`);
-					}
-					if (ownerData.name) {
-						await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${ownerData.name}`);
-					}
-				}
-			}
+			await syncAliases(null);
 			await ctx.reply('Business facts cleared.');
 		} else {
 			if (
@@ -627,21 +461,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 				factsValue = factsValue.substring(1, factsValue.length - 1);
 			}
 			await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${String(userId)}`, factsValue);
-			const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${userId}`);
-			if (connectionId) {
-				const ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
-					`business_connection:${connectionId}`,
-					'json',
-				);
-				if (ownerData) {
-					if (ownerData.username) {
-						await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${ownerData.username}`, factsValue);
-					}
-					if (ownerData.name) {
-						await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${ownerData.name}`, factsValue);
-					}
-				}
-			}
+			await syncAliases(factsValue);
 			await ctx.reply(`Business facts updated to:\n\n${factsValue}`);
 		}
 	});
@@ -651,20 +471,33 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		if (commitSha === 'unknown' || commitSha === 'dev') {
 			await ctx.reply(`Commit: \`${commitSha}\``);
 		} else {
-			const link = `https://codeberg.org/codebam/cf-workers-telegram-bot/commit/${commitSha}`;
-			await ctx.reply(`Latest deployed commit: [${commitSha.substring(0, 7)}](${link})`, {
-				parse_mode: 'Markdown',
-			});
+			const link = `https://github.com/codebam/cf-workers-telegram-bot/commit/${commitSha}`;
+			await ctx.reply(`Latest deployed commit: [${commitSha.substring(0, 7)}](${link})`, { parse_mode: 'Markdown' });
 		}
 	});
 
 	bot.use(commands);
 
-	bot.on('message:document', async (ctx) => {
-		await ctx.conversation.enter('chatConversation');
-	});
-
 	bot.on('pre_checkout_query', async (ctx) => {
+		// Validate the payload *before* accepting. Approving blindly meant a user
+		// could pay for a task whose 1h KV entry had already expired, consuming
+		// their Stars for nothing.
+		const payload = ctx.preCheckoutQuery.invoice_payload;
+		if (payload.startsWith('load:')) {
+			const amount = parseInt(payload.slice(5), 10);
+			if (!Number.isInteger(amount) || amount <= 0 || amount > 1000) {
+				await ctx.answerPreCheckoutQuery(false, 'That top-up amount is no longer valid.');
+				return;
+			}
+			await ctx.answerPreCheckoutQuery(true);
+			return;
+		}
+
+		const task = await ctx.env.CONVERSATION_HISTORY.get(`task:${payload}`);
+		if (!task) {
+			await ctx.answerPreCheckoutQuery(false, 'This request expired. Please send your message again.');
+			return;
+		}
 		await ctx.answerPreCheckoutQuery(true);
 	});
 
@@ -674,67 +507,97 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		const userId = ctx.from?.id;
 		if (!userId) return;
 
+		// Telegram can redeliver the update; the charge id is the natural key.
+		const chargeId = payment.telegram_payment_charge_id;
+		const paymentKey = `payment:${chargeId}`;
+		if (await ctx.env.CONVERSATION_HISTORY.get(paymentKey)) {
+			console.log(`[successful_payment] Charge ${chargeId} already credited. Skipping.`);
+			return;
+		}
+		await ctx.env.CONVERSATION_HISTORY.put(paymentKey, 'true', { expirationTtl: 86400 * 30 });
+
 		if (payload.startsWith('load:')) {
-			const amount = parseInt(payload.split(':')[1]);
-			const balanceKey = `balance:${String(userId)}`;
-			const balance = await getBalance(userId, ctx.env.CONVERSATION_HISTORY);
-			const newBalance = balance + amount;
-			await ctx.env.CONVERSATION_HISTORY.put(balanceKey, JSON.stringify(newBalance));
-			await logTransaction(userId, ctx.env.CONVERSATION_HISTORY, {
-				amount,
-				type: 'load',
-				newBalance,
-				description: 'Telegram Stars Top-up'
+			const amount = parseInt(payload.slice(5), 10);
+			if (!Number.isInteger(amount) || amount <= 0) {
+				console.error(`[successful_payment] Malformed load payload: ${payload}`);
+				await ctx.reply('Something went wrong reading that top-up. Please contact support.');
+				return;
+			}
+			const result = await accountCredit(ctx.env, userId, amount, 'load', {
+				description: 'Telegram Stars Top-up',
 			});
-			await ctx.reply(`Successfully loaded ${String(amount)} Stars! New balance: ${String(newBalance)} Stars.`);
+			await ctx.reply(`Successfully loaded ${String(amount)} Stars! New balance: ${String(result.balance)} Stars.`);
 			return;
 		}
 
-		const taskId = payload;
-		const task = await ctx.env.CONVERSATION_HISTORY.get<Task>(`task:${taskId}`, 'json');
+		const task = await ctx.env.CONVERSATION_HISTORY.get<Task>(`task:${payload}`, 'json');
 		if (!task) {
-			await ctx.reply('Error: Task not found');
+			// Pre-checkout validated this, so the entry expired in the gap. Give
+			// the Stars back rather than silently keeping them.
+			console.error(`[successful_payment] Task ${payload} vanished after pre-checkout. Refunding.`);
+			try {
+				await ctx.api.refundStarPayment(userId, chargeId);
+				await ctx.reply('That request expired before it could run, so your Stars have been refunded.');
+			} catch (e) {
+				console.error('[successful_payment] Refund failed:', e);
+				await ctx.reply('Error: request expired and the automatic refund failed. Please contact support.');
+			}
 			return;
 		}
 		task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
-		await ctx.env.STREAM_WORKFLOW.create({
-			params: task,
-		});
-		await ctx.env.CONVERSATION_HISTORY.delete(`task:${taskId}`);
+		// Paid directly rather than debited, so there is nothing to refund on
+		// failure through the balance ledger.
+		task.chargedAmount = undefined;
+		await ctx.env.STREAM_WORKFLOW.create({ params: task });
+		await ctx.env.CONVERSATION_HISTORY.delete(`task:${payload}`);
 	});
-
-	bot.on('message:photo', async (ctx) => {
-		await ctx.conversation.enter('chatConversation');
-	});
-
-	bot.on('message:voice', async (ctx) => {
-		const fileId = ctx.message.voice.file_id;
-		await chargeStars(ctx, { type: 'voice', prompt: '', fileId });
-	});
-
 
 	bot.on('business_connection', async (ctx) => {
 		const connection = ctx.businessConnection;
-		const ownerName = connection.user.first_name;
-		const username = connection.user.username;
-		const ownerId = connection.user.id;
-		await ctx.env.CONVERSATION_HISTORY.put(`active_connection:${ownerId}`, connection.id);
+		await ctx.env.CONVERSATION_HISTORY.put(`active_connection:${connection.user.id}`, connection.id);
 		await ctx.env.CONVERSATION_HISTORY.put(
 			`business_connection:${connection.id}`,
 			JSON.stringify({
-				id: ownerId,
-				name: ownerName || 'the business owner',
-				username: username,
+				id: connection.user.id,
+				name: connection.user.first_name || 'the business owner',
+				username: connection.user.username,
 			}),
 		);
 	});
 
-	bot.on('business_message', async (ctx) => {
-		await ctx.conversation.enter('chatConversation');
+	bot.on('message:voice', async (ctx) => {
+		await chargeStars(ctx, { type: 'voice', prompt: '', fileId: ctx.message.voice.file_id });
+	});
+
+	bot.on('message:photo', async (ctx) => {
+		const photo = ctx.message.photo;
+		const largest = photo[photo.length - 1];
+		await chargeStars(ctx, {
+			type: 'photo',
+			prompt: buildPrompt(ctx) || 'Please describe this image',
+			fileId: largest.file_id,
+		});
+	});
+
+	bot.on('message:document', async (ctx) => {
+		await chargeStars(ctx, { type: 'tool_call', prompt: buildPrompt(ctx) });
 	});
 
 	bot.on('message:text', async (ctx) => {
-		await ctx.conversation.enter('chatConversation');
+		await chargeStars(ctx, { type: 'tool_call', prompt: buildPrompt(ctx) });
+	});
+
+	bot.on('business_message', async (ctx) => {
+		const photo = ctx.businessMessage.photo;
+		if (photo) {
+			await chargeStars(ctx, {
+				type: 'photo',
+				prompt: buildPrompt(ctx) || 'Please describe this image',
+				fileId: photo[photo.length - 1].file_id,
+			});
+			return;
+		}
+		await chargeStars(ctx, { type: 'business_message', prompt: buildPrompt(ctx) });
 	});
 
 	bot.on('guest_message', async (ctx) => {
@@ -765,31 +628,16 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		if (prompt.includes('/start') && guestMessage.guest_query_id) {
 			try {
 				const isDev = ctx.env.ENVIRONMENT === 'dev';
-				const messageText = 'Welcome! Here are my commands:\n' +
-					'/balance - Check your current Star balance\n' +
-					'/load <amount> - Top up your balance with Telegram Stars\n' +
-					'/photo <prompt> - Generate an image (100 Stars)\n' +
-					'/model <name> - Switch AI model and see costs\n' +
-					'/prompt ["prompt"] - Set your custom system prompt (no args to view, "" or reset to clear)\n' +
-					'/facts ["facts"] - Set facts about yourself for business mode (no args to view, "" or reset to clear)\n' +
-					'<prompt> - Generate text (may use tools if supported by model)\n' +
-					'Send a voice note - Transform your bot into a voice assistant (+20 Stars)\n' +
-					'/clear - Clear your conversation history\n\n' +
-					'New users start with 200 free credits!' +
-					(isDev ? '' : '\n\nClick the button below to open the Web App!');
-
 				await ctx.api.answerGuestQuery(guestMessage.guest_query_id, {
 					type: 'article',
 					id: crypto.randomUUID(),
 					title: 'Welcome',
 					input_message_content: {
-						message_text: messageText,
+						message_text: HELP_TEXT + (isDev ? '' : '\n\nClick the button below to open the Web App!'),
 					},
-					reply_markup: isDev ? undefined : {
-						inline_keyboard: [
-							[{ text: 'Open Web App', url: 'https://tux-robot.codebam.ca' }],
-						],
-					},
+					reply_markup: isDev
+						? undefined
+						: { inline_keyboard: [[{ text: 'Open Web App', url: 'https://tux-robot.codebam.ca' }]] },
 				});
 			} catch (e) {
 				console.error('[guest_message] Failed to answer guest query:', e);
@@ -817,159 +665,141 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 }
 
-async function processTask(task: Task, env: Environment): Promise<void> {
-	try {
-		if (task.updateId) {
-			const processedKey = `processed_update:${String(task.updateId)}`;
-			const alreadyProcessed = await env.CONVERSATION_HISTORY.get(processedKey);
-			if (alreadyProcessed) {
-				console.log(`[processTask] Update ${task.updateId} already processed. Skipping duplicate execution.`);
-				return;
-			}
-			await env.CONVERSATION_HISTORY.put(processedKey, 'true', { expirationTtl: 3600 });
-		}
-
-
-
-		const token = env.SECRET_TELEGRAM_API_TOKEN;
-		if (!token) {
-			throw new Error('SECRET_TELEGRAM_API_TOKEN is empty in processTask');
-		}
-		const botInstance = createBotInstance(token);
-
-		if (task.type === 'voice' && task.fileId) {
-			try {
-				const file = await botInstance.api.getFile(task.fileId);
-				const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-				const fileRes = await fetch(fileUrl);
-				if (fileRes.ok) {
-					const audioData = await fileRes.arrayBuffer();
-					const hashBuffer = await crypto.subtle.digest('SHA-256', audioData);
-					const hashHex = Array.from(new Uint8Array(hashBuffer))
-						.map((b) => b.toString(16).padStart(2, '0'))
-						.join('');
-					const cacheKey = `whisper_cache:${hashHex}`;
-					let transcriptionText = await env.CONVERSATION_HISTORY.get(cacheKey);
-					if (!transcriptionText) {
-						console.log(`[processTask] Whisper Cache MISS. Running Whisper AI...`);
-						const transcription = (await env.AI.run('@cf/openai/whisper', {
-							audio: [...new Uint8Array(audioData)],
-						})) as { text: string };
-						transcriptionText = transcription.text || '';
-						if (transcriptionText) {
-							await env.CONVERSATION_HISTORY.put(cacheKey, transcriptionText, { expirationTtl: 86400 * 7 });
-						}
-					} else {
-						console.log(`[processTask] Whisper Cache HIT. Using cached transcription.`);
-					}
-					if (transcriptionText) {
-						task.prompt = transcriptionText;
-						task.type = 'message';
-					}
-				}
-			} catch (e) {
-				console.error('[processTask] Failed to transcribe voice:', e);
-				await botInstance.api.sendMessage(task.chatId!, 'Failed to transcribe voice message.', {
-					business_connection_id: task.businessConnectionId,
-					reply_parameters: { message_id: task.messageId! },
-				});
-				return;
-			}
-		}
-
-		if (task.type === 'gen_photo') {
-			try {
-				const response = (await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
-					prompt: task.prompt,
-				})) as { image: string };
-
-				if (response.image) {
-					const binaryString = atob(response.image);
-					const bytes = new Uint8Array(binaryString.length);
-					for (let i = 0; i < binaryString.length; i++) {
-						bytes[i] = binaryString.charCodeAt(i);
-					}
-					await botInstance.api.sendPhoto(task.chatId!, new InputFile(bytes, 'photo.png'), {
-						business_connection_id: task.businessConnectionId,
-						reply_parameters: { message_id: task.messageId! },
-					});
-					return;
-				}
-			} catch (e) {
-				console.error('[processTask] Failed to generate photo:', e);
-				await botInstance.api.sendMessage(task.chatId!, 'Failed to generate photo.', {
-					business_connection_id: task.businessConnectionId,
-					reply_parameters: { message_id: task.messageId! },
-				});
-				return;
-			}
-		}
-
-		const userMessage: ChatMessage = { role: 'user', content: task.prompt };
-		if (task.type === 'photo' && task.fileId) {
-			try {
-				const file = await botInstance.api.getFile(task.fileId);
-				const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-				const fileRes = await fetch(fileUrl);
-				if (fileRes.ok) {
-					const arrayBuffer = await fileRes.arrayBuffer();
-					const base64Data = arrayBufferToBase64(arrayBuffer);
-					userMessage.geminiParts = [
-						{ text: task.prompt || 'Please describe this image' },
-						{
-							inlineData: {
-								mimeType: 'image/jpeg',
-								data: base64Data
-							}
-						}
-					];
-					try {
-						const sandbox = getSandbox(env.Sandbox as any, String(task.userId));
-						await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
-						console.log(`[processTask] Proactively wrote uploaded_image.png to sandbox.`);
-					} catch (se) {
-						console.warn(`[processTask] Sandbox not bound or failed writing image:`, se);
-					}
-				}
-			} catch (e) {
-				console.error('[processTask] Failed to download image for vision task:', e);
-			}
-		}
-
-		const messages = [
-			{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
-			...(task.history || []),
-			userMessage,
-		];
-		const modelId = task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8';
-
-		const responseContent = await streamAiResponseToTelegram(
-			{
-				env,
-				api: botInstance.api,
-			},
-			env.AI,
-			modelId,
-			messages,
-			task,
-			[
-				fetchTool,
-				wikipediaTool,
-				createTavilySearchTool(env.TAVILY_API_KEY || ''),
-				createSandboxTool(env, env.Sandbox as any, String(task.userId)) as unknown as Tool,
-				createTelegramFileReaderTool(env, env.Sandbox as any, String(task.userId), messages, modelId) as unknown as Tool,
-				createTelegramFileSearchTool(env, String(task.userId), modelId) as unknown as Tool,
-				createCodeWorkspaceTool(env, env.Sandbox as any, String(task.userId), botInstance.api, task) as unknown as Tool,
-			],
+/** Build the tool list for a task, honouring feature flags and model support. */
+function buildTools(env: Environment, task: Task, messages: ChatMessage[], modelId: string, api: Api, opts: { sandbox: boolean; tavily: boolean }): Tool[] {
+	const tools: Tool[] = [fetchTool as unknown as Tool, wikipediaTool as unknown as Tool];
+	if (opts.tavily) {
+		tools.push(createTavilySearchTool(env.TAVILY_API_KEY || '') as unknown as Tool);
+	}
+	if (opts.sandbox) {
+		tools.push(createSandboxTool(env, env.Sandbox as any, String(task.userId)) as unknown as Tool);
+		tools.push(
+			createTelegramFileReaderTool(env, env.Sandbox as any, String(task.userId), messages, modelId) as unknown as Tool,
 		);
+		tools.push(createCodeWorkspaceTool(env, env.Sandbox as any, String(task.userId), api, task) as unknown as Tool);
+	}
+	tools.push(createTelegramFileSearchTool(env, String(task.userId), modelId) as unknown as Tool);
+	return tools;
+}
 
-		if (task.userId && responseContent) {
-			const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
-			await historyManager.addMessage(task.userId, task.prompt, responseContent, task.threadId);
+async function processTask(task: Task, env: Environment): Promise<void> {
+	const token = env.SECRET_TELEGRAM_API_TOKEN;
+	if (!token) {
+		throw new Error('SECRET_TELEGRAM_API_TOKEN is empty in processTask');
+	}
+	const botInstance = createBotInstance(token);
+
+	if (task.type === 'voice' && task.fileId) {
+		try {
+			const file = await botInstance.api.getFile(task.fileId);
+			const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+			const fileRes = await fetch(fileUrl);
+			if (fileRes.ok) {
+				const audioData = await fileRes.arrayBuffer();
+				const hashBuffer = await crypto.subtle.digest('SHA-256', audioData);
+				const hashHex = Array.from(new Uint8Array(hashBuffer))
+					.map((b) => b.toString(16).padStart(2, '0'))
+					.join('');
+				const cacheKey = `whisper_cache:${hashHex}`;
+				let transcriptionText = await env.CONVERSATION_HISTORY.get(cacheKey);
+				if (!transcriptionText) {
+					console.log(`[processTask] Whisper Cache MISS. Running Whisper AI...`);
+					const transcription = (await env.AI.run('@cf/openai/whisper', {
+						audio: [...new Uint8Array(audioData)],
+					})) as { text: string };
+					transcriptionText = transcription.text || '';
+					if (transcriptionText) {
+						await env.CONVERSATION_HISTORY.put(cacheKey, transcriptionText, { expirationTtl: 86400 * 7 });
+					}
+				} else {
+					console.log(`[processTask] Whisper Cache HIT.`);
+				}
+				if (transcriptionText) {
+					task.prompt = transcriptionText;
+					task.type = 'message';
+				}
+			}
+		} catch (e) {
+			console.error('[processTask] Failed to transcribe voice:', e);
+			await botInstance.api.sendMessage(task.chatId!, 'Failed to transcribe voice message.', {
+				business_connection_id: task.businessConnectionId,
+				reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+			});
+			throw e;
 		}
-	} catch (e) {
-		console.error('[processTask] Error processing task:', e);
-		throw e;
+	}
+
+	if (task.type === 'gen_photo') {
+		const response = (await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
+			prompt: task.prompt,
+		})) as { image: string };
+
+		if (!response.image) {
+			throw new Error('Image generation returned no image');
+		}
+		const binaryString = atob(response.image);
+		const bytes = new Uint8Array(binaryString.length);
+		for (let i = 0; i < binaryString.length; i++) {
+			bytes[i] = binaryString.charCodeAt(i);
+		}
+		await botInstance.api.sendPhoto(task.chatId!, new InputFile(bytes, 'photo.png'), {
+			business_connection_id: task.businessConnectionId,
+			reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+		});
+		return;
+	}
+
+	const userMessage: ChatMessage = { role: 'user', content: task.prompt };
+	if (task.type === 'photo' && task.fileId) {
+		try {
+			const file = await botInstance.api.getFile(task.fileId);
+			const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+			const fileRes = await fetch(fileUrl);
+			if (fileRes.ok) {
+				const arrayBuffer = await fileRes.arrayBuffer();
+				const base64Data = arrayBufferToBase64(arrayBuffer);
+				userMessage.geminiParts = [
+					{ text: task.prompt || 'Please describe this image' },
+					{ inlineData: { mimeType: 'image/jpeg', data: base64Data } },
+				];
+				try {
+					const sandbox = getSandbox(env.Sandbox as any, String(task.userId));
+					await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
+				} catch (se) {
+					console.warn(`[processTask] Sandbox not bound or failed writing image:`, se);
+				}
+			}
+		} catch (e) {
+			console.error('[processTask] Failed to download image for vision task:', e);
+		}
+	}
+
+	const messages: ChatMessage[] = [
+		{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
+		...(task.history || []),
+		userMessage,
+	];
+	const modelId = task.modelId || AVAILABLE_MODELS[DEFAULT_MODEL].id;
+	const modelConfig = modelConfigById(modelId);
+
+	// Models without tool support choke on a tools array; only offer tools to
+	// models that advertise them.
+	const tools = modelConfig?.supportsTools
+		? buildTools(env, task, messages, modelId, botInstance.api, { sandbox: true, tavily: true })
+		: [];
+
+	const responseContent = await streamAiResponseToTelegram(
+		{ env, api: botInstance.api },
+		env.AI,
+		modelId,
+		messages,
+		task,
+		tools,
+	);
+
+	if (task.userId && responseContent) {
+		const historyManager = new HistoryManager(env.CONVERSATION_HISTORY);
+		await historyManager.addMessage(task.userId, task.prompt, responseContent, task.threadId);
 	}
 }
 
@@ -978,23 +808,63 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 		const task = event.payload;
 
 		if (
-			task.type === 'message' ||
-			task.type === 'business_message' ||
-			task.type === 'tool_call' ||
-			task.type === 'photo' ||
-			task.type === 'voice' ||
-			task.type === 'gen_photo'
+			task.type !== 'message' &&
+			task.type !== 'business_message' &&
+			task.type !== 'tool_call' &&
+			task.type !== 'photo' &&
+			task.type !== 'voice' &&
+			task.type !== 'gen_photo'
 		) {
-			await step.do('process task', {
-				retries: {
-					limit: 3,
-					delay: '2 seconds',
-					backoff: 'exponential',
+			return;
+		}
+
+		const processedKey = task.updateId ? `processed_update:${String(task.updateId)}` : null;
+		if (processedKey && (await this.env.CONVERSATION_HISTORY.get(processedKey))) {
+			console.log(`[BotWorkflow] Update ${task.updateId} already processed. Skipping.`);
+			return;
+		}
+
+		try {
+			await step.do(
+				'process task',
+				{ retries: { limit: 3, delay: '2 seconds', backoff: 'exponential' }, timeout: '5 minutes' },
+				async () => {
+					await processTask(task, this.env);
 				},
-				timeout: '5 minutes',
-			}, async () => {
-				await processTask(task, this.env);
+			);
+			// Marked only after the work actually succeeded. Writing this up front
+			// made every retry a no-op, silently dropping the message.
+			if (processedKey) {
+				await this.env.CONVERSATION_HISTORY.put(processedKey, 'true', { expirationTtl: 3600 });
+			}
+		} catch (e) {
+			console.error('[BotWorkflow] Task failed after all retries:', e);
+			await step.do('refund and notify', { retries: { limit: 2, delay: '2 seconds', backoff: 'exponential' } }, async () => {
+				if (task.chargedAmount && task.billingUserId) {
+					await accountCredit(this.env, task.billingUserId, task.chargedAmount, 'refund', {
+						model: task.modelId,
+						taskType: task.type,
+						description: 'Refund: generation failed',
+					});
+				}
+				if (task.chatId && task.telegramToken) {
+					try {
+						await createBotInstance(task.telegramToken).api.sendMessage(
+							task.chatId,
+							task.chargedAmount
+								? 'Sorry, that request failed. Your Stars have been refunded.'
+								: 'Sorry, that request failed. Please try again.',
+							{
+								business_connection_id: task.businessConnectionId,
+								reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+							},
+						);
+					} catch (notifyErr) {
+						console.error('[BotWorkflow] Failed to notify user of failure:', notifyErr);
+					}
+				}
 			});
+			throw e;
 		}
 	}
 }
@@ -1003,32 +873,28 @@ const app = new Hono<{ Bindings: Environment }>();
 
 app.onError((err, c) => {
 	console.error(`[Bot Error]: ${err.message}`);
-	if (err.stack) {
-		console.error(`[Bot Error Stack]:\n${err.stack}`);
-	}
+	if (err.stack) console.error(`[Bot Error Stack]:\n${err.stack}`);
 
-	// Return a 200 OK to Telegram so it doesn't continuously retry
-	// and spam a broken update loop into your server.
-	if (c.req.method === 'POST') {
-		const pathname = new URL(c.req.url).pathname;
-		if (pathname !== '/verify' && pathname !== '/workflow') {
-			return c.text('Internal handled', 200);
-		}
+	// The Telegram webhook route returns 200 on purpose: a non-2xx makes
+	// Telegram redeliver the same broken update in a tight loop. Every other
+	// route reports the failure honestly.
+	const pathname = new URL(c.req.url).pathname;
+	const isWebhookRoute = c.req.method === 'POST' && pathname !== '/verify' && pathname !== '/workflow' && !pathname.startsWith('/api/');
+	if (isWebhookRoute) {
+		return c.text('Internal handled', 200);
 	}
-
 	return c.text('Internal Server Error', 500);
 });
 
-// Middleware to verify Telegram Webhook Secret Token if configured
+// Verify the Telegram webhook secret token on webhook deliveries only.
 app.use('*', async (c, next) => {
 	if (c.req.method === 'POST') {
 		const pathname = new URL(c.req.url).pathname;
-		// Skip verification for /verify and /workflow API routes
-		if (pathname !== '/verify' && pathname !== '/workflow') {
+		if (pathname !== '/verify' && pathname !== '/workflow' && !pathname.startsWith('/api/')) {
 			const expectedSecret = c.env.SECRET_TELEGRAM_WEBHOOK;
 			if (expectedSecret) {
 				const receivedSecret = c.req.header('X-Telegram-Bot-Api-Secret-Token');
-				if (receivedSecret !== expectedSecret) {
+				if (!secretsMatch(receivedSecret, expectedSecret)) {
 					console.warn('[Security] Unauthorized webhook request: secret token mismatch');
 					return c.text('Unauthorized', 401);
 				}
@@ -1038,134 +904,185 @@ app.use('*', async (c, next) => {
 	await next();
 });
 
+/**
+ * Authenticate a request from the web app. Identity always comes from the
+ * signed Telegram proof, never from a caller-supplied user id.
+ */
+async function authenticate(c: { req: { header: (k: string) => string | undefined }; env: Environment }, proofOverride?: string) {
+	const proof = proofOverride ?? c.req.header('x-telegram-auth');
+	return verifyTelegramAuth(proof, c.env.SECRET_TELEGRAM_API_TOKEN);
+}
+
 app.post('/verify', async (c) => {
 	try {
-		const body = await c.req.json() as { authProof?: string };
-		if (body.authProof) {
-			const isInitDataValid = await verifyTelegramWebAppData(body.authProof, c.env.SECRET_TELEGRAM_API_TOKEN);
-			const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(body.authProof, c.env.SECRET_TELEGRAM_API_TOKEN);
-			if (isInitDataValid || isLoginDataValid) {
-				return c.json({ valid: true }, 200);
-			}
+		const body = (await c.req.json()) as { authProof?: string };
+		const { valid, userId } = await verifyTelegramAuth(body.authProof, c.env.SECRET_TELEGRAM_API_TOKEN);
+		if (valid && userId) {
+			return c.json({ valid: true, userId }, 200);
 		}
-	} catch (e) {
+	} catch {
 		return c.json({ valid: false }, 401);
 	}
 	return c.json({ valid: false }, 401);
 });
 
-app.post('/workflow', async (c) => {
-	const xTelegramAuth = c.req.header('x-telegram-auth');
+/** Authoritative balance read for the web app. */
+app.post('/api/account', async (c) => {
+	const { valid, userId } = await authenticate(c);
+	if (!valid || !userId) return c.json({ error: 'Unauthorized' }, 401);
+	const balance = await accountBalance(c.env, userId);
+	return c.json({ userId, balance });
+});
 
-	if (!xTelegramAuth) {
-		return c.text('Unauthorized: Missing Telegram auth proof', 401);
+/** Atomic debit for the web app (uploads and anything else it prices itself). */
+app.post('/api/account/charge', async (c) => {
+	const { valid, userId } = await authenticate(c);
+	if (!valid || !userId) return c.json({ error: 'Unauthorized' }, 401);
+
+	let body: { amount?: number; description?: string };
+	try {
+		body = (await c.req.json()) as { amount?: number; description?: string };
+	} catch {
+		return c.json({ error: 'Invalid JSON' }, 400);
 	}
-	
-	const isInitDataValid = await verifyTelegramWebAppData(xTelegramAuth, c.env.SECRET_TELEGRAM_API_TOKEN);
-	const isLoginDataValid = !isInitDataValid && await verifyTelegramLogin(xTelegramAuth, c.env.SECRET_TELEGRAM_API_TOKEN);
-	
-	if (!isInitDataValid && !isLoginDataValid) {
-		return c.text('Unauthorized: Invalid Telegram auth proof', 401);
+
+	const amount = Number(body.amount);
+	if (!Number.isInteger(amount) || amount < 0 || amount > 100_000) {
+		return c.json({ error: 'Invalid amount' }, 400);
 	}
-	
+
+	const result = await accountCharge(c.env, userId, amount, {
+		taskType: 'webapp',
+		description: body.description?.slice(0, 200) || 'Web App charge',
+	});
+	return c.json(result, result.ok ? 200 : 402);
+});
+
+app.post('/workflow', async (c) => {
+	const { valid, userId } = await authenticate(c);
+	if (!valid || !userId) {
+		return c.text('Unauthorized: Invalid or expired Telegram auth proof', 401);
+	}
+
 	let task: Task;
 	try {
-		task = await c.req.json() as Task;
-	} catch (e) {
-		return c.text('Unauthorized: Invalid JSON', 401);
+		task = (await c.req.json()) as Task;
+	} catch {
+		return c.text('Invalid JSON', 400);
 	}
 
+	// Identity is taken from the verified proof. Previously the body's userId was
+	// used verbatim, which let any authenticated caller run tools inside another
+	// user's sandbox and read their uploaded files.
+	task.userId = userId;
+	task.senderId = userId;
+	task.billingUserId = userId;
+	task.telegramToken = undefined;
+	task.tools = undefined;
+	if (Array.isArray(task.history) && task.history.length > MAX_HISTORY_MESSAGES) {
+		task.history = task.history.slice(-MAX_HISTORY_MESSAGES);
+	}
 
-	
-	console.log(`[Fetch] Task type: ${task.type}, prompt: ${task.prompt}, stream: ${task.stream}`);
+	// Price from the model registry, never from the request.
+	const requested = modelConfigById(task.modelId);
+	const preferenceKey = (await c.env.CONVERSATION_HISTORY.get<string>(`model:${String(userId)}`)) ?? DEFAULT_MODEL;
+	const modelConfig = requested ?? AVAILABLE_MODELS[preferenceKey] ?? AVAILABLE_MODELS[DEFAULT_MODEL];
+	task.modelId = modelConfig.id;
 
-	const userMessage: ChatMessage = { role: 'user', content: task.prompt };
-	if (task.type === 'photo' && task.fileId) {
-		try {
-			const api = createBotInstance(c.env.SECRET_TELEGRAM_API_TOKEN).api;
-			const file = await api.getFile(task.fileId);
-			if (file.file_path) {
-				const fileUrl = `https://api.telegram.org/file/bot${c.env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
-				const fileRes = await fetch(fileUrl);
-				if (fileRes.ok) {
-					const arrayBuffer = await fileRes.arrayBuffer();
-					const base64Data = arrayBufferToBase64(arrayBuffer);
-					userMessage.geminiParts = [
-						{ text: task.prompt || 'Please describe this image' },
-						{
-							inlineData: {
-								mimeType: 'image/jpeg',
-								data: base64Data
-							}
+	const charge = await accountCharge(c.env, userId, modelConfig.cost, {
+		model: modelConfig.id,
+		taskType: task.type,
+		description: 'Web App generation',
+	});
+	if (!charge.ok) {
+		return c.json({ error: 'Insufficient balance', balance: charge.balance, shortfall: charge.shortfall }, 402);
+	}
+
+	const refund = async (reason: string) => {
+		await accountCredit(c.env, userId, modelConfig.cost, 'refund', {
+			model: modelConfig.id,
+			taskType: task.type,
+			description: `Refund: ${reason}`,
+		});
+	};
+
+	console.log(`[Workflow] user=${userId} type=${task.type} model=${task.modelId} stream=${task.stream}`);
+
+	try {
+		const userMessage: ChatMessage = { role: 'user', content: task.prompt };
+		if (task.type === 'photo' && task.fileId) {
+			try {
+				const api = createBotInstance(c.env.SECRET_TELEGRAM_API_TOKEN).api;
+				const file = await api.getFile(task.fileId);
+				if (file.file_path) {
+					const fileUrl = `https://api.telegram.org/file/bot${c.env.SECRET_TELEGRAM_API_TOKEN}/${file.file_path}`;
+					const fileRes = await fetch(fileUrl);
+					if (fileRes.ok) {
+						const base64Data = arrayBufferToBase64(await fileRes.arrayBuffer());
+						userMessage.geminiParts = [
+							{ text: task.prompt || 'Please describe this image' },
+							{ inlineData: { mimeType: 'image/jpeg', data: base64Data } },
+						];
+						try {
+							const sandbox = getSandbox(c.env.Sandbox as any, String(userId));
+							await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
+						} catch (se) {
+							console.warn(`[Workflow] Sandbox not bound or failed writing image:`, se);
 						}
-					];
-					try {
-						const sandbox = getSandbox(c.env.Sandbox as any, String(task.userId));
-						await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
-						console.log(`[Fetch] Proactively wrote uploaded_image.png to sandbox.`);
-					} catch (se) {
-						console.warn(`[Fetch] Sandbox not bound or failed writing image:`, se);
 					}
 				}
+			} catch (e) {
+				console.error('[Workflow] Failed to download image for vision task:', e);
 			}
-		} catch (e) {
-			console.error('[Fetch] Failed to download image for vision task:', e);
 		}
+
+		const messages: ChatMessage[] = [
+			{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
+			...(task.history || []),
+			userMessage,
+		];
+
+		const isTavilyEnabled =
+			(await c.env.FLAGS?.getBooleanValue('tavily-search', false, { userId: String(userId) })) ?? false;
+		const isSandboxEnabled =
+			(await c.env.FLAGS?.getBooleanValue('code-sandbox', false, { userId: String(userId) })) ?? false;
+
+		const tools =
+			task.type === 'tool_call' && modelConfig.supportsTools
+				? buildTools(c.env, task, messages, modelConfig.id, createBotInstance(c.env.SECRET_TELEGRAM_API_TOKEN).api, {
+						sandbox: isSandboxEnabled,
+						tavily: isTavilyEnabled,
+					})
+				: [];
+
+		const aiResponse = await customRunWithTools(
+			c.env.AI,
+			modelConfig.id,
+			{ messages, tools },
+			{ streamFinalResponse: task.stream || false },
+		);
+
+		let stream: ReadableStream | null = null;
+		if (aiResponse instanceof ReadableStream) {
+			stream = aiResponse;
+		} else if (aiResponse && typeof aiResponse === 'object' && 'body' in aiResponse && aiResponse.body instanceof ReadableStream) {
+			stream = aiResponse.body;
+		} else if (aiResponse && typeof aiResponse === 'object' && 'getReader' in aiResponse && typeof aiResponse.getReader === 'function') {
+			stream = aiResponse as unknown as ReadableStream;
+		}
+
+		if (task.stream && stream) {
+			return new Response(stream, {
+				headers: { 'Content-Type': 'text/event-stream', 'x-new-balance': String(charge.balance) },
+			});
+		}
+
+		return c.json(aiResponse, 200, { 'x-new-balance': String(charge.balance) });
+	} catch (e) {
+		console.error('[Workflow] Generation failed, refunding:', e);
+		await refund('generation failed');
+		return c.json({ error: `AI error: ${String(e)}` }, 500);
 	}
-
-	const messages = [
-		{ role: 'system', content: task.systemPrompt || 'You are a helpful assistant.' },
-		...(task.history || []),
-		userMessage,
-	];
-
-	const isTavilyEnabled = await c.env.FLAGS?.getBooleanValue("tavily-search", false, { userId: String(task.userId) }) ?? false;
-	const isSandboxEnabled = await c.env.FLAGS?.getBooleanValue("code-sandbox", false, { userId: String(task.userId) }) ?? false;
-
-	const tools: Tool[] = [
-		fetchTool as unknown as Tool,
-		wikipediaTool as unknown as Tool,
-	];
-
-	if (isTavilyEnabled) {
-		tools.push(createTavilySearchTool(c.env.TAVILY_API_KEY || '') as unknown as Tool);
-	}
-
-	if (isSandboxEnabled) {
-		tools.push(createSandboxTool(c.env, c.env.Sandbox as any, String(task.userId)) as unknown as Tool);
-		tools.push(createTelegramFileReaderTool(c.env, c.env.Sandbox as any, String(task.userId), messages, task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8') as unknown as Tool);
-		tools.push(createCodeWorkspaceTool(c.env, c.env.Sandbox as any, String(task.userId), createBotInstance(c.env.SECRET_TELEGRAM_API_TOKEN).api, task) as unknown as Tool);
-	}
-
-	tools.push(createTelegramFileSearchTool(c.env, String(task.userId), task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8') as unknown as Tool);
-
-	const aiResponse = await customRunWithTools(
-		c.env.AI,
-		task.modelId || '@cf/meta/llama-3.1-8b-instruct-fp8',
-		{ messages, tools: task.type === 'tool_call' ? tools : [] },
-		{ streamFinalResponse: task.stream || false },
-	);
-
-	console.log(`[Fetch] aiResponse type: ${typeof aiResponse}, constructor: ${aiResponse && typeof aiResponse === 'object' ? aiResponse.constructor?.name : 'unknown'}`);
-
-	let stream: ReadableStream | null = null;
-	if (aiResponse instanceof ReadableStream) {
-		stream = aiResponse;
-	} else if (aiResponse && typeof aiResponse === 'object' && 'body' in aiResponse && aiResponse.body instanceof ReadableStream) {
-		stream = aiResponse.body;
-	} else if (aiResponse && typeof aiResponse === 'object' && 'getReader' in aiResponse && typeof aiResponse.getReader === 'function') {
-		stream = aiResponse as unknown as ReadableStream;
-	}
-
-	if (task.stream && stream) {
-		console.log(`[Fetch] Returning streaming response. Locked: ${stream.locked}`);
-		return new Response(stream, {
-			headers: { 'Content-Type': 'text/event-stream' },
-		});
-	}
-
-	console.log('[Fetch] Returning JSON response');
-	return c.json(aiResponse);
 });
 
 app.all('*', async (c) => {
@@ -1173,12 +1090,22 @@ app.all('*', async (c) => {
 	const method = c.req.method;
 
 	if (method === 'GET' && c.req.query('command') === 'set') {
-		const token = c.env.SECRET_TELEGRAM_API_TOKEN;
-		const webhookUrl = `${url.origin}${url.pathname}`;
-		const api = createBotInstance(token).api;
+		// This endpoint used to be public: anyone could re-register the webhook
+		// with drop_pending_updates and flush the queue.
+		const adminToken = c.env.SECRET_ADMIN_TOKEN;
+		const provided = c.req.query('token') || c.req.header('x-admin-token');
+		if (!adminToken) {
+			console.warn('[Security] Refusing /?command=set: SECRET_ADMIN_TOKEN is not configured');
+			return c.json({ ok: false, error: 'SECRET_ADMIN_TOKEN is not configured' }, 503);
+		}
+		if (!secretsMatch(provided, adminToken)) {
+			console.warn('[Security] Unauthorized webhook registration attempt');
+			return c.json({ ok: false, error: 'Unauthorized' }, 401);
+		}
 
+		const api = createBotInstance(c.env.SECRET_TELEGRAM_API_TOKEN).api;
 		try {
-			const result = await api.setWebhook(webhookUrl, {
+			const result = await api.setWebhook(`${url.origin}${url.pathname}`, {
 				max_connections: 40,
 				allowed_updates: [
 					'message',
@@ -1207,14 +1134,6 @@ app.all('*', async (c) => {
 		const bot = createBotInstance(token);
 		setupBot(bot, c.env, c.executionCtx);
 
-		const clone = c.req.raw.clone();
-		try {
-			const body = await clone.json();
-			console.log('[Fetch] Incoming Update:', JSON.stringify(body));
-		} catch (e) {
-			console.error('[Fetch] Error parsing update body:', e);
-		}
-
 		try {
 			return await webhookCallback(bot, 'hono', {
 				timeoutMilliseconds: 15_000,
@@ -1223,7 +1142,7 @@ app.all('*', async (c) => {
 		} catch (e: any) {
 			console.error('[Fetch-Webhook-Error] Error during webhook update handling:', e);
 			if (e instanceof GrammyError) {
-				console.error(`[Fetch-Webhook-Error] GrammyError: ${e.method}, Error Code: ${e.error_code}, Description: ${e.description}`);
+				console.error(`[Fetch-Webhook-Error] GrammyError: ${e.method}, ${e.error_code}, ${e.description}`);
 			} else if (e instanceof HttpError) {
 				console.error(`[Fetch-Webhook-Error] HttpError: Could not contact Telegram API.`, e);
 			} else if (e instanceof Error) {

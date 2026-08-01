@@ -1,6 +1,5 @@
 import type { Api } from 'grammy';
-import { autoRetry, type AutoRetryOptions } from '@grammyjs/auto-retry';
-import { streamApi, type StreamContextExtension } from '@grammyjs/stream';
+import { streamApi } from '@grammyjs/stream';
 import {
 	markdownToMarkdownV2,
 	markdownToRichBlocks,
@@ -233,7 +232,6 @@ export async function customRunWithTools(
 				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
 				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
 				max_tokens: 65536,
-				max_completion_tokens: 65536,
 				stream,
 			};
 
@@ -412,25 +410,6 @@ export async function customRunWithTools(
 	return finalResponse as AiResponse;
 }
 
-export async function sendMessageDraft(api: Api, data: Record<string, any>, options?: Partial<AutoRetryOptions>) {
-	if (api?.config?.use) {
-		api.config.use(autoRetry(options));
-	}
-	const textLen = typeof data.text === 'string' ? data.text.length : 0;
-	const payload: any = {
-		chat_id: data.chat_id,
-		draft_id: data.draft_id,
-		rich_message: {
-			blocks: markdownToRichBlocks(data.text || ''),
-			markdown: data.text,
-		},
-		message_thread_id: data.message_thread_id,
-		business_connection_id: data.business_connection_id,
-	};
-	await (api.raw as any).sendRichMessageDraft(payload);
-	console.log(`[sendRichMessageDraft] Success. Len: ${textLen}`);
-}
-
 export interface StreamChunk {
 	type: 'content' | 'thinking' | 'reasoning';
 	text: string;
@@ -585,6 +564,25 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 					yield* flushPending();
 				}
 			}
+			// Some providers end the body without a trailing newline, leaving the
+			// last event stranded in the buffer.
+			const leftover = buffer.trim();
+			if (leftover) {
+				const payload = leftover.startsWith('data: ') ? leftover.slice(6).trim() : leftover;
+				if (payload && payload !== '[DONE]' && payload.startsWith('{')) {
+					try {
+						const parsed = JSON.parse(payload);
+						const text = extractText(parsed);
+						if (text) {
+							const filtered = filter.push(text);
+							if (filtered) pendingContent += filtered;
+						}
+					} catch {
+						console.warn(`[runStream] Discarding unparsable trailing buffer (${buffer.length} chars)`);
+					}
+				}
+				buffer = '';
+			}
 			// Final flush
 			yield* flushPending();
 		} catch (outerErr) {
@@ -622,33 +620,35 @@ export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMe
 export interface StreamCtx {
 	env: { SECRET_TELEGRAM_API_TOKEN: string };
 	api: Api;
-	replyWithStream?: StreamContextExtension['replyWithStream'];
 }
 
-function formatTelegramMessage(
-	content: string,
-	thinking?: string,
-	reasoning?: string
-): { text: string; parse_mode: 'MarkdownV2' } {
-	const formatBlock = (label: string, text?: string) => {
-		if (!text || !text.trim()) return '';
-		return `<details><summary>${label}</summary>\n${text.trim()}\n</details>\n\n`;
-	};
+/** Telegram rejected the markup rather than the request itself. */
+function isFormattingError(e: any): boolean {
+	if (e?.error_code !== 400) return false;
+	const description = String(e.description ?? '');
+	return (
+		description.includes("can't parse entities") ||
+		description.includes('BLOCKS_INVALID') ||
+		description.includes('RICH_MESSAGE') ||
+		description.includes('ENTITY')
+	);
+}
 
-	let message = '';
-	message += formatBlock('Thinking', thinking);
-	message += formatBlock('Reasoning', reasoning);
-
-	if (content && content.trim()) {
-		message += content.trim();
-	}
-
-	return { text: message.trim().slice(0, 32000), parse_mode: 'MarkdownV2' };
+/** Last-resort rendering: one paragraph per line, no markup at all. */
+function plainTextBlocks(text: string): Array<{ type: string; text: string }> {
+	const trimmed = text.trim();
+	if (!trimmed) return [{ type: 'paragraph', text: '' }];
+	return trimmed
+		.split(/\n{2,}/)
+		.map((para) => ({ type: 'paragraph', text: para.trim() }))
+		.filter((b) => b.text.length > 0);
 }
 
 /**
- * Creates an "Optimistic" API wrapper that retries failing sendMessageDraft calls 
- * with escaped text if the initial formatted call fails due to invalid syntax.
+ * Wraps the raw API so every outgoing message is rendered as Telegram rich
+ * blocks, falling back to unformatted paragraphs when Telegram rejects the
+ * markup. Without the fallback a single malformed table or code fence from the
+ * model loses the entire reply.
  */
 function createOptimisticApi(raw: any): any {
 	const smartSanitize = (text: string) => {
@@ -665,34 +665,50 @@ function createOptimisticApi(raw: any): any {
 			if (prop === 'sendMessageDraft' || prop === 'sendRichMessageDraft') {
 				return async (data: any, signal?: AbortSignal) => {
 					let rawText = data.text || data.rich_message?.markdown || '';
-					const blocks = markdownToRichBlocks(rawText);
-					return await target.sendRichMessageDraft({
-						chat_id: data.chat_id,
-						draft_id: data.draft_id,
-						rich_message: {
-							blocks: blocks,
-							markdown: rawText,
-						},
-						message_thread_id: data.message_thread_id,
-						business_connection_id: data.business_connection_id,
-					}, signal);
+					const send = (blocks: any[]) =>
+						target.sendRichMessageDraft(
+							{
+								chat_id: data.chat_id,
+								draft_id: data.draft_id,
+								rich_message: { blocks, markdown: rawText },
+								message_thread_id: data.message_thread_id,
+								business_connection_id: data.business_connection_id,
+							},
+							signal,
+						);
+					try {
+						return await send(markdownToRichBlocks(rawText));
+					} catch (e: any) {
+						if (!isFormattingError(e)) throw e;
+						console.warn(`[OptimisticApi] sendRichMessageDraft rejected the markup, retrying as plain text. ${e.description ?? e}`);
+						return await send(plainTextBlocks(rawText));
+					}
 				};
 			}
 
 			if (prop === 'sendMessage' || prop === 'sendRichMessage') {
 				return async (data: any, signal?: AbortSignal) => {
 					let rawText = data.text || data.rich_message?.markdown || '';
-					const blocks = markdownToRichBlocks(rawText);
-					return await target.sendRichMessage({
-						chat_id: data.chat_id,
-						rich_message: {
-							blocks: blocks,
-							markdown: rawText,
-						},
-						message_thread_id: data.message_thread_id,
-						business_connection_id: data.business_connection_id,
-						reply_parameters: data.reply_parameters || (data.reply_to_message_id ? { message_id: data.reply_to_message_id } : undefined),
-					}, signal);
+					const send = (blocks: any[]) =>
+						target.sendRichMessage(
+							{
+								chat_id: data.chat_id,
+								rich_message: { blocks, markdown: rawText },
+								message_thread_id: data.message_thread_id,
+								business_connection_id: data.business_connection_id,
+								reply_parameters:
+									data.reply_parameters ||
+									(data.reply_to_message_id ? { message_id: data.reply_to_message_id } : undefined),
+							},
+							signal,
+						);
+					try {
+						return await send(markdownToRichBlocks(rawText));
+					} catch (e: any) {
+						if (!isFormattingError(e)) throw e;
+						console.warn(`[OptimisticApi] sendRichMessage rejected the markup, retrying as plain text. ${e.description ?? e}`);
+						return await send(plainTextBlocks(rawText));
+					}
 				};
 			}
 			if (prop === 'answerGuestQuery') {
@@ -904,8 +920,84 @@ async function* adaptiveThrottled(generator: AsyncGenerator<string>): AsyncGener
 	}
 }
 
+const TEXT_LIMIT = 3500;
+const TRUNCATION_NOTICE = '\n\n[Truncated due to Telegram length limit]';
+
 /**
- * Get AI stream for a model and yield formatted snapshots for Telegram.
+ * Build the message the user sees, incrementally and **append-only**.
+ *
+ * The Telegram stream plugin concatenates the deltas it is handed, so a
+ * snapshot that is not an extension of the previous one corrupts both the live
+ * draft and the final message. The old implementation re-rendered the whole
+ * message every chunk, which broke that contract twice: reasoning arriving
+ * after the first content token got prepended in front of text already sent,
+ * and the final snapshot truncated the body to 3500 characters — shortening a
+ * string that had already been streamed in full.
+ *
+ * This version only ever appends:
+ *   - reasoning is rendered as a blockquote while it is the only thing we have;
+ *   - once body content starts, the quote is closed and never reopened
+ *     (late reasoning is dropped from the visible message rather than
+ *     rewriting history);
+ *   - the length cap is enforced as content arrives, so the final snapshot is
+ *     an extension of the last streamed one.
+ */
+class AppendOnlyMessage {
+	private text = '';
+	private quoteOpen = false;
+	private contentStarted = false;
+	private contentLength = 0;
+	private truncated = false;
+
+	/** Everything emitted so far. Always grows, never changes retroactively. */
+	get value(): string {
+		return this.text;
+	}
+
+	private appendQuoted(chunk: string) {
+		if (!this.quoteOpen) {
+			this.text += '> ';
+			this.quoteOpen = true;
+		}
+		this.text += chunk.replace(/\n/g, '\n> ');
+	}
+
+	/** Reasoning / thinking tokens. Ignored once the answer body has begun. */
+	addThinking(chunk: string) {
+		if (this.contentStarted || !chunk) return;
+		this.appendQuoted(chunk);
+	}
+
+	/** Answer body tokens. */
+	addContent(chunk: string) {
+		if (!chunk || this.truncated) return;
+		if (!this.contentStarted) {
+			// Leading whitespace would show up as a blank first line.
+			const trimmed = this.quoteOpen ? chunk.replace(/^\s+/, '') : chunk.replace(/^\s+/, '');
+			if (!trimmed) return;
+			if (this.quoteOpen) this.text += '\n\n';
+			this.contentStarted = true;
+			chunk = trimmed;
+		}
+
+		const remaining = TEXT_LIMIT - this.contentLength;
+		if (chunk.length >= remaining) {
+			this.text += chunk.slice(0, remaining) + TRUNCATION_NOTICE;
+			this.contentLength = TEXT_LIMIT;
+			this.truncated = true;
+			return;
+		}
+		this.text += chunk;
+		this.contentLength += chunk.length;
+	}
+
+	get hasContent(): boolean {
+		return this.text.trim().length > 0;
+	}
+}
+
+/**
+ * Get AI stream for a model and yield append-only snapshots for Telegram.
  */
 export async function* getTelegramStream(
 	ai: AiRunner,
@@ -913,74 +1005,64 @@ export async function* getTelegramStream(
 	messages: ChatMessage[],
 	tools: Tool[] = []
 ): AsyncGenerator<string> {
-	let streamContent = '';
-	let thinkingContent = '';
-	let reasoningContent = '';
-
-	const filter = createThinkFilter();
+	const message = new AppendOnlyMessage();
+	let lastEmitted = '';
 
 	try {
+		// NOTE: runStream already strips think-tags from content chunks; filtering
+		// a second time here only re-trimmed leading whitespace.
 		for await (const chunk of getAiStream(ai, modelId, messages, tools, () => {})) {
-			if (chunk.type === 'thinking') {
-				thinkingContent += chunk.text;
-			} else if (chunk.type === 'reasoning') {
-				reasoningContent += chunk.text;
+			if (chunk.type === 'thinking' || chunk.type === 'reasoning') {
+				message.addThinking(chunk.text);
 			} else if (chunk.type === 'content') {
-				const filtered = filter.push(chunk.text);
-				if (filtered) streamContent += filtered;
+				message.addContent(chunk.text);
 			}
 
-			const snapshot = formatTelegramMessage(
-				streamContent,
-				thinkingContent,
-				reasoningContent
-			);
-			
-			if (snapshot.text.trim()) {
-				yield snapshot.text;
+			if (message.hasContent && message.value !== lastEmitted) {
+				lastEmitted = message.value;
+				yield lastEmitted;
 			}
 		}
 	} catch (e) {
 		console.error(`[getTelegramStream] Loop Error:`, e);
 	}
 
-	const tail = filter.end();
-	if (tail) streamContent += tail;
-
-	const TEXT_LIMIT = 3500;
-	if (streamContent.length > TEXT_LIMIT) {
-		streamContent = streamContent.slice(0, TEXT_LIMIT) + '\n\n[Truncated due to Telegram length limit]';
-	}
-
-	if (streamContent.trim() || thinkingContent.trim() || reasoningContent.trim()) {
-		const final = formatTelegramMessage(streamContent, thinkingContent, reasoningContent);
-		yield final.text;
+	if (message.hasContent && message.value !== lastEmitted) {
+		yield message.value;
 	}
 }
 
 /**
- * Converts a stream of prefix-append-only snapshots into a stream of incremental deltas.
+ * Converts a stream of append-only snapshots into incremental deltas.
+ *
+ * Divergence should be impossible now that {@link AppendOnlyMessage} owns the
+ * rendering, but the downstream plugin can only append, so a divergent snapshot
+ * is dropped rather than emitted as a garbled tail.
  */
 async function* snapshotsToDeltas(generator: AsyncGenerator<string>): AsyncGenerator<string> {
 	let lastValue = '';
 	for await (const value of generator) {
 		if (value.startsWith(lastValue)) {
-			yield value.slice(lastValue.length);
+			const delta = value.slice(lastValue.length);
+			if (delta) yield delta;
 			lastValue = value;
 		} else {
-			let commonLen = 0;
-			while (commonLen < lastValue.length && commonLen < value.length && lastValue[commonLen] === value[commonLen]) {
-				commonLen++;
-			}
-			yield value.slice(commonLen);
-			lastValue = value;
+			console.warn(
+				`[snapshotsToDeltas] Non-append-only snapshot dropped (had ${lastValue.length} chars, got ${value.length}).`,
+			);
 		}
 	}
 }
 
-export interface StreamCtx {
-	env: { SECRET_TELEGRAM_API_TOKEN: string };
-	api: Api;
+/**
+ * Drop the leading reasoning blockquote so conversation history stores the
+ * answer rather than the model's scratchpad.
+ */
+function stripLeadingQuote(text: string): string {
+	const lines = text.split('\n');
+	let i = 0;
+	while (i < lines.length && (lines[i].startsWith('> ') || lines[i] === '>' || lines[i] === '')) i++;
+	return i >= lines.length ? text.trim() : lines.slice(i).join('\n').trim();
 }
 
 /**
@@ -1062,5 +1144,5 @@ export async function streamAiResponseToTelegram(
 		}
 	}
 
-	return lastContent;
+	return stripLeadingQuote(lastContent);
 }

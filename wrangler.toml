@@ -30,9 +30,17 @@ image = "./Dockerfile"
 class_name = "Sandbox"
 name = "Sandbox"
 
+[[durable_objects.bindings]]
+class_name = "UserAccount"
+name = "USER_ACCOUNT"
+
 [[migrations]]
 new_sqlite_classes = ["Sandbox"]
 tag = "v1"
+
+[[migrations]]
+new_sqlite_classes = ["UserAccount"]
+tag = "v2"
 
 [[workflows]]
 name = "bot-workflow"
@@ -59,7 +67,7 @@ index_name = "tux-robot-knowledge-dev"
 
 [[env.dev.kv_namespaces]]
 binding = "CONVERSATION_HISTORY"
-id = "7c147881ce7d42b8811bfbf8c38e3ee4"
+id = "5b1f7559b4044dc28122dc9345d5ab36"
 
 [[env.dev.r2_buckets]]
 binding = "R2"
@@ -77,6 +85,10 @@ image = "./Dockerfile"
 [[env.dev.durable_objects.bindings]]
 class_name = "Sandbox"
 name = "Sandbox"
+
+[[env.dev.durable_objects.bindings]]
+class_name = "UserAccount"
+name = "USER_ACCOUNT"
 
 [[env.dev.flagship]]
 binding = "FLAGS"
@@ -116,6 +128,10 @@ image = "./Dockerfile"
 [[env.production.durable_objects.bindings]]
 class_name = "Sandbox"
 name = "Sandbox"
+
+[[env.production.durable_objects.bindings]]
+class_name = "UserAccount"
+name = "USER_ACCOUNT"
 
 [[env.production.flagship]]
 binding = "FLAGS"

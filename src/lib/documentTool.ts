@@ -72,17 +72,34 @@ export async function parseTelegramFile(
 		}
 
 		let arrayBuffer: ArrayBuffer | null = null;
-		if (_userId && file_id) {
-			const docMeta = await env.CONVERSATION_HISTORY.get<{ r2Key?: string }>(`doc_metadata:${_userId}:${file_id}`, 'json');
-			const r2Key = docMeta?.r2Key || `uploads/${_userId}/${file_id}`;
-			try {
-				const r2Object = await env.R2.get(r2Key);
-				if (r2Object) {
-					console.log(`[parseTelegramFile] R2 HIT for user uploaded file: ${r2Key}`);
-					arrayBuffer = await r2Object.arrayBuffer();
+		if (_userId && (file_id || file_name)) {
+			// Web app uploads are keyed by file *name* (`doc_metadata:<user>:<name>`,
+			// `uploads/<user>/<name>`); Telegram uploads by file_id. Try both rather
+			// than always missing one of them.
+			const candidateKeys = [
+				file_name ? `doc_metadata:${_userId}:${file_name}` : null,
+				file_id ? `doc_metadata:${_userId}:${file_id}` : null,
+			].filter((k): k is string => k !== null);
+
+			const r2Candidates: string[] = [];
+			for (const metaKey of candidateKeys) {
+				const docMeta = await env.CONVERSATION_HISTORY.get<{ r2Key?: string }>(metaKey, 'json');
+				if (docMeta?.r2Key) r2Candidates.push(docMeta.r2Key);
+			}
+			if (file_name) r2Candidates.push(`uploads/${_userId}/${file_name}`);
+			if (file_id) r2Candidates.push(`uploads/${_userId}/${file_id}`);
+
+			for (const r2Key of [...new Set(r2Candidates)]) {
+				try {
+					const r2Object = await env.R2.get(r2Key);
+					if (r2Object) {
+						console.log(`[parseTelegramFile] R2 HIT for user uploaded file: ${r2Key}`);
+						arrayBuffer = await r2Object.arrayBuffer();
+						break;
+					}
+				} catch (r2Err) {
+					console.log(`[parseTelegramFile] R2 check failed for ${r2Key}:`, r2Err);
 				}
-			} catch (r2Err) {
-				console.log(`[parseTelegramFile] R2 check failed for ${r2Key}:`, r2Err);
 			}
 		}
 
