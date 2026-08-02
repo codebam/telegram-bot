@@ -14,6 +14,7 @@ import {
 	PHOTO_COST_STARS,
 	VOICE_SURCHARGE_STARS,
 	modelConfigById,
+	VISION_FALLBACK_MODEL,
 	verifyTelegramAuth,
 	type Task,
 	type Environment,
@@ -235,7 +236,7 @@ async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) 
 	if (task.type === 'tool_call' && !preferred.supportsTools) {
 		effective = AVAILABLE_MODELS[defaultModel] ?? AVAILABLE_MODELS[DEFAULT_MODEL];
 	} else if ((task.type === 'photo' || task.geminiParts?.some((p) => p.inlineData)) && !preferred.supportsVision) {
-		effective = AVAILABLE_MODELS['google/gemini-3.1-flash-lite'];
+		effective = AVAILABLE_MODELS[VISION_FALLBACK_MODEL];
 	}
 	task.modelId = effective.id;
 
