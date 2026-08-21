@@ -3,6 +3,12 @@ import { autoRetry } from '@grammyjs/auto-retry';
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
 import { Hono } from 'hono';
 
+/** Minimal surface of the Workers execution context; hono's `c.executionCtx` satisfies it. */
+type ExecutionCtx = {
+	waitUntil(promise: Promise<any>): void;
+	passThroughOnException(): void;
+};
+
 import { CommandGroup, type CommandsFlavor } from '@grammyjs/commands';
 import {
 	HistoryManager,
@@ -45,7 +51,7 @@ function secretsMatch(a: string | undefined | null, b: string | undefined | null
 type MyContext = CommandsFlavor &
 	Context & {
 		env: Environment;
-		executionCtx: ExecutionContext;
+		executionCtx: ExecutionCtx;
 	};
 
 export function createBotInstance(token: string): Bot<MyContext> {
@@ -300,7 +306,7 @@ async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) 
 	}
 }
 
-function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionContext) {
+function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionCtx) {
 	bot.use(async (ctx, next) => {
 		const updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
 		console.log(`[Grammy-Update] Received update: ${ctx.update.update_id}, Type: ${updateType}`);
