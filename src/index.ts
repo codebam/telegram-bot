@@ -675,8 +675,8 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 /** Build the tool list for a task, honouring feature flags and model support. */
 function buildTools(env: Environment, task: Task, messages: ChatMessage[], modelId: string, api: Api, opts: { sandbox: boolean; tavily: boolean }): Tool[] {
 	const tools: Tool[] = [fetchTool as unknown as Tool, wikipediaTool as unknown as Tool];
-	if (opts.tavily) {
-		tools.push(createTavilySearchTool(env.TAVILY_API_KEY || '') as unknown as Tool);
+	if (opts.tavily && env.TAVILY_API_KEY) {
+		tools.push(createTavilySearchTool(env.TAVILY_API_KEY) as unknown as Tool);
 	}
 	if (opts.sandbox) {
 		tools.push(createSandboxTool(env, env.Sandbox as any, String(task.userId)) as unknown as Tool);
@@ -790,9 +790,18 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 	const modelConfig = modelConfigById(modelId);
 
 	// Models without tool support choke on a tools array; only offer tools to
-	// models that advertise them.
+	// models that advertise them. Honour the same feature flags as the webapp
+	// surface so both expose an identical toolset.
+	const isTavilyEnabled =
+		(await env.FLAGS?.getBooleanValue('tavily-search', false, { userId: String(task.userId) })) ?? false;
+	const isSandboxEnabled =
+		(await env.FLAGS?.getBooleanValue('code-sandbox', false, { userId: String(task.userId) })) ?? false;
+
 	const tools = modelConfig?.supportsTools
-		? buildTools(env, task, messages, modelId, botInstance.api, { sandbox: true, tavily: true })
+		? buildTools(env, task, messages, modelId, botInstance.api, {
+				sandbox: isSandboxEnabled,
+				tavily: isTavilyEnabled,
+			})
 		: [];
 
 	const responseContent = await streamAiResponseToTelegram(
