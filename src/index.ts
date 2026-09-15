@@ -29,7 +29,7 @@ import {
 } from '@codebam/shared';
 import { fetchTool, wikipediaTool, createTavilySearchTool, createSandboxTool, createCodeWorkspaceTool } from './lib/utils.js';
 import { createTelegramFileReaderTool, createTelegramFileSearchTool } from './lib/documentTool.js';
-import { streamAiResponseToTelegram, customRunWithTools } from './lib/ai.js';
+import { streamAiResponseToTelegram, customRunWithTools, generationStopKey } from './lib/ai.js';
 import { accountBalance, accountCharge, accountCredit } from './lib/account.js';
 
 import { getSandbox } from '@cloudflare/sandbox';
@@ -306,37 +306,8 @@ async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) 
 	}
 }
 
-function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionCtx) {
-	bot.use(async (ctx, next) => {
-		const updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
-		console.log(`[Grammy-Update] Received update: ${ctx.update.update_id}, Type: ${updateType}`);
-		ctx.env = env;
-		ctx.executionCtx = executionCtx;
-		try {
-			await next();
-			console.log(`[Grammy-Update] Finished handling update ${ctx.update.update_id}`);
-		} catch (e) {
-			console.error(`[Grammy-Update] Error handling update ${ctx.update.update_id}:`, e);
-			if (e instanceof GrammyError) {
-				console.error(`[Grammy-Error-Detail] Method: ${e.method}, Error Code: ${e.error_code}, Description: ${e.description}`);
-			} else if (e instanceof HttpError) {
-				console.error(`[Grammy-Error-Detail] HTTP network connection error contacting Telegram API.`, e);
-			} else if (e instanceof Error) {
-				console.error(`[Grammy-Error-Detail] Stack trace:\n${e.stack}`);
-			}
-			throw e;
-		}
-	});
-
-	// NOTE: autoRetry is installed once, in createBotInstance. Installing it a
-	// second time here stacked two retry transformers (up to 9 attempts).
-	bot.api.config.use(async (prev, method, payload, signal) => {
-		console.log(`[Grammy-API] Request: ${method}`);
-		const res = await prev(method, payload, signal);
-		console.log(`[Grammy-API] Success: ${method}`);
-		return res;
-	});
-
+/** Build the command group (also published to Telegram via setMyCommands). */
+function createCommands(): CommandGroup<MyContext> {
 	const commands = new CommandGroup<MyContext>();
 
 	commands.command('start', 'Welcome message and command list', async (ctx) => {
@@ -483,7 +454,41 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 	});
 
-	bot.use(commands);
+	return commands;
+}
+
+function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: ExecutionCtx) {
+	bot.use(async (ctx, next) => {
+		const updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
+		console.log(`[Grammy-Update] Received update: ${ctx.update.update_id}, Type: ${updateType}`);
+		ctx.env = env;
+		ctx.executionCtx = executionCtx;
+		try {
+			await next();
+			console.log(`[Grammy-Update] Finished handling update ${ctx.update.update_id}`);
+		} catch (e) {
+			console.error(`[Grammy-Update] Error handling update ${ctx.update.update_id}:`, e);
+			if (e instanceof GrammyError) {
+				console.error(`[Grammy-Error-Detail] Method: ${e.method}, Error Code: ${e.error_code}, Description: ${e.description}`);
+			} else if (e instanceof HttpError) {
+				console.error(`[Grammy-Error-Detail] HTTP network connection error contacting Telegram API.`, e);
+			} else if (e instanceof Error) {
+				console.error(`[Grammy-Error-Detail] Stack trace:\n${e.stack}`);
+			}
+			throw e;
+		}
+	});
+
+	// NOTE: autoRetry is installed once, in createBotInstance. Installing it a
+	// second time here stacked two retry transformers (up to 9 attempts).
+	bot.api.config.use(async (prev, method, payload, signal) => {
+		console.log(`[Grammy-API] Request: ${method}`);
+		const res = await prev(method, payload, signal);
+		console.log(`[Grammy-API] Success: ${method}`);
+		return res;
+	});
+
+	bot.use(createCommands());
 
 	bot.on('pre_checkout_query', async (ctx) => {
 		// Validate the payload *before* accepting. Approving blindly meant a user
@@ -653,6 +658,18 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		}
 
 		await chargeStars(ctx, { type: 'message', prompt });
+	});
+
+	// Bot API 10.3: the user pressed the stop button on a streamed draft.
+	// Record it so the running workflow's stream loop can end generation early.
+	bot.on('stopped_message_generation', async (ctx) => {
+		const stopped = ctx.stoppedMessageGeneration;
+		if (!stopped) return;
+		const key = generationStopKey(stopped.chat.id, stopped.message_thread_id);
+		await ctx.env.CONVERSATION_HISTORY.put(key, 'true', { expirationTtl: 600 });
+		console.log(
+			`[stop-generation] Draft ${stopped.draft_id} in chat ${stopped.chat.id} stopped by user (key=${key})`,
+		);
 	});
 
 	bot.catch((err) => {
@@ -1119,9 +1136,9 @@ app.all('*', async (c) => {
 			return c.json({ ok: false, error: 'Unauthorized' }, 401);
 		}
 
-		const api = createBotInstance(c.env.SECRET_TELEGRAM_API_TOKEN).api;
+		const bot = createBotInstance(c.env.SECRET_TELEGRAM_API_TOKEN);
 		try {
-			const result = await api.setWebhook(`${url.origin}${url.pathname}`, {
+			const result = await bot.api.setWebhook(`${url.origin}${url.pathname}`, {
 				max_connections: 40,
 				allowed_updates: [
 					'message',
@@ -1130,11 +1147,19 @@ app.all('*', async (c) => {
 					'guest_message',
 					'business_message',
 					'business_connection',
+					'stopped_message_generation',
 					'pre_checkout_query',
 				],
 				drop_pending_updates: true,
 				secret_token: c.env.SECRET_TELEGRAM_WEBHOOK,
 			});
+			// Sync the command menu Telegram clients show above the keyboard. A
+			// failed command sync must not mask a successful webhook registration.
+			try {
+				await createCommands().setCommands(bot);
+			} catch (commandErr) {
+				console.warn('[setWebhook] Failed to publish command menu:', commandErr);
+			}
 			return c.json({ ok: result });
 		} catch (e: any) {
 			return c.json({ ok: false, error: e.message }, 500);

@@ -617,9 +617,20 @@ export async function* getAiStream(ai: AiRunner, model: string, messages: ChatMe
 	yield* runStream(ai, model, messages, tools, onStatusUpdate);
 }
 
+/** Minimal KV surface needed to observe a user stopping a stream. */
+export interface StopStore {
+	get(key: string): Promise<string | null>;
+	delete(key: string): Promise<void>;
+}
+
 export interface StreamCtx {
-	env: { SECRET_TELEGRAM_API_TOKEN: string };
+	env: { SECRET_TELEGRAM_API_TOKEN: string; CONVERSATION_HISTORY?: StopStore };
 	api: Api;
+}
+
+/** KV key under which a `stopped_message_generation` update is recorded. */
+export function generationStopKey(chatId: number | string, threadId?: number): string {
+	return `generation_stopped:${String(chatId)}:${String(threadId ?? 0)}`;
 }
 
 /** Telegram rejected the markup rather than the request itself. */
@@ -664,15 +675,20 @@ function createOptimisticApi(raw: any): any {
 		get(target, prop, receiver) {
 			if (prop === 'sendMessageDraft' || prop === 'sendRichMessageDraft') {
 				return async (data: any, signal?: AbortSignal) => {
-					let rawText = data.text || data.rich_message?.markdown || '';
+					const rawText = data.text || data.rich_message?.markdown || '';
+					// Forward every remaining field (can_stop, keep_on_stop,
+					// message_thread_id, ...) instead of dropping the ones the
+					// rich API does not share with sendMessageDraft.
+					const { chat_id, draft_id, text, rich_message, parse_mode, ...rest } = data;
+					void text;
+					void parse_mode;
 					const send = (blocks: any[]) =>
 						target.sendRichMessageDraft(
 							{
-								chat_id: data.chat_id,
-								draft_id: data.draft_id,
-								rich_message: { blocks, markdown: rawText },
-								message_thread_id: data.message_thread_id,
-								business_connection_id: data.business_connection_id,
+								...rest,
+								chat_id,
+								draft_id,
+								rich_message: { ...(rich_message || {}), blocks, markdown: rawText },
 							},
 							signal,
 						);
@@ -688,17 +704,20 @@ function createOptimisticApi(raw: any): any {
 
 			if (prop === 'sendMessage' || prop === 'sendRichMessage') {
 				return async (data: any, signal?: AbortSignal) => {
-					let rawText = data.text || data.rich_message?.markdown || '';
+					const rawText = data.text || data.rich_message?.markdown || '';
+					const { chat_id, text, rich_message, parse_mode, reply_to_message_id, ...rest } = data;
+					void text;
+					void parse_mode;
+					const reply_parameters =
+						data.reply_parameters ||
+						(reply_to_message_id ? { message_id: reply_to_message_id } : undefined);
 					const send = (blocks: any[]) =>
 						target.sendRichMessage(
 							{
-								chat_id: data.chat_id,
-								rich_message: { blocks, markdown: rawText },
-								message_thread_id: data.message_thread_id,
-								business_connection_id: data.business_connection_id,
-								reply_parameters:
-									data.reply_parameters ||
-									(data.reply_to_message_id ? { message_id: data.reply_to_message_id } : undefined),
+								...rest,
+								chat_id,
+								rich_message: { ...(rich_message || {}), blocks, markdown: rawText },
+								reply_parameters,
 							},
 							signal,
 						);
@@ -920,6 +939,36 @@ async function* adaptiveThrottled(generator: AsyncGenerator<string>): AsyncGener
 	}
 }
 
+const STOP_POLL_INTERVAL_MS = 1000;
+
+/**
+ * End a streaming generator as soon as the user presses Telegram's
+ * stop-generation button (Bot API 10.3). Checking is throttled so a long
+ * generation costs at most one KV read per interval. Ending the stream lets
+ * the stream plugin persist the partial answer as the final message, which is
+ * what Telegram recommends because drafts are only temporary previews.
+ */
+async function* stopWhenRequested(
+	source: AsyncGenerator<string>,
+	isStopRequested: () => Promise<boolean>,
+): AsyncGenerator<string> {
+	let emitted = false;
+	let lastCheck = 0;
+	for await (const value of source) {
+		const now = Date.now();
+		if (now - lastCheck >= STOP_POLL_INTERVAL_MS) {
+			lastCheck = now;
+			if (await isStopRequested()) {
+				console.log('[stopWhenRequested] User stopped generation. Ending stream early.');
+				if (!emitted) yield '⏹ Stopped.';
+				return;
+			}
+		}
+		emitted = true;
+		yield value;
+	}
+}
+
 const TEXT_LIMIT = 3500;
 const TRUNCATION_NOTICE = '\n\n[Truncated due to Telegram length limit]';
 
@@ -1080,8 +1129,30 @@ export async function streamAiResponseToTelegram(
 
 	const rawStream = getTelegramStream(ai, modelId, messages, tools);
 	// Adaptive throttle instead of hard 5-second pause
-	const stream = adaptiveThrottled(rawStream);
-	
+	const throttled = adaptiveThrottled(rawStream);
+
+	// Bot API 10.3 stop button. Only ordinary private-chat streams carry a
+	// draft; guest and business replies are one-shot messages.
+	const stopStore = ctx.env.CONVERSATION_HISTORY;
+	const stopKey = task.chatId ? generationStopKey(task.chatId, task.threadId) : undefined;
+	const canStop =
+		Boolean(stopStore && stopKey) &&
+		task.updateType !== 'guest_message' &&
+		task.updateType !== 'business_message';
+	const stream = canStop
+		? stopWhenRequested(throttled, async () => {
+				try {
+					const stopped = (await stopStore!.get(stopKey!)) !== null;
+					if (stopped) await stopStore!.delete(stopKey!);
+					return stopped;
+				} catch (e) {
+					// A KV hiccup must never break a generation.
+					console.warn('[streamAiResponseToTelegram] Stop check failed:', e);
+					return false;
+				}
+			})
+		: throttled;
+
 	let lastContent = '';
 	const wrappedStream = (async function* () {
 		for await (const content of stream) {
@@ -1090,8 +1161,7 @@ export async function streamAiResponseToTelegram(
 		}
 	})();
 
-	const otherDraft = {
-		parse_mode: 'MarkdownV2' as const,
+	const streamParams = {
 		message_thread_id: task.threadId,
 		business_connection_id: task.businessConnectionId,
 	};
@@ -1136,11 +1206,17 @@ export async function streamAiResponseToTelegram(
 			const { streamMessage } = streamApi(optimisticRaw);
 			const deltaStream = snapshotsToDeltas(wrappedStream);
 
-			// Note: We stream with MarkdownV2 for both drafts and the final message.
-			await streamMessage(Number(task.chatId), draftIdOffset, deltaStream, otherDraft, {
-				...otherDraft,
-				reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
-			});
+			// Both the drafts and the final message flow through the rich-message proxy above.
+			await streamMessage(
+				Number(task.chatId),
+				draftIdOffset,
+				deltaStream,
+				{ ...streamParams, can_stop: true, keep_on_stop: true },
+				{
+					...streamParams,
+					reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+				},
+			);
 		}
 	}
 
