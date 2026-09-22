@@ -656,6 +656,16 @@ function plainTextBlocks(text: string): Array<{ type: string; text: string }> {
 }
 
 /**
+ * The subset of the raw API surface the ephemeral streamer needs. The
+ * optimistic proxy renders rich blocks for these methods and falls back to
+ * plain paragraphs when Telegram rejects the markup.
+ */
+interface EphemeralDeliveryApi {
+	sendRichMessage(data: Record<string, unknown>): Promise<{ ephemeral_message_id?: number }>;
+	editEphemeralMessageText(data: Record<string, unknown>): Promise<unknown>;
+}
+
+/**
  * Wraps the raw API so every outgoing message is rendered as Telegram rich
  * blocks, falling back to unformatted paragraphs when Telegram rejects the
  * markup. Without the fallback a single malformed table or code fence from the
@@ -730,26 +740,73 @@ function createOptimisticApi(raw: any): any {
 					}
 				};
 			}
+			if (prop === 'editEphemeralMessageText') {
+				// Bot API 10.2: ephemeral group replies are streamed by editing
+				// the message in place, since drafts are private-chat only.
+				return async (data: any, signal?: AbortSignal) => {
+					const rawText = data.text || data.rich_message?.markdown || '';
+					const { chat_id, receiver_user_id, ephemeral_message_id, text, rich_message, parse_mode, ...rest } = data;
+					void text;
+					void parse_mode;
+					const edit = (blocks: any[]) =>
+						target.editEphemeralMessageText(
+							{
+								...rest,
+								chat_id,
+								receiver_user_id,
+								ephemeral_message_id,
+								rich_message: { ...(rich_message || {}), blocks, markdown: rawText },
+							},
+							signal,
+						);
+					try {
+						return await edit(markdownToRichBlocks(rawText));
+					} catch (e: any) {
+						if (!isFormattingError(e)) throw e;
+						console.warn(`[OptimisticApi] editEphemeralMessageText rejected the markup, retrying as plain text. ${e.description ?? e}`);
+						return await edit(plainTextBlocks(rawText));
+					}
+				};
+			}
 			if (prop === 'answerGuestQuery') {
 				return async (data: any, signal?: AbortSignal) => {
-					try {
-						const repairedData = { ...data };
-						if (repairedData?.result?.input_message_content?.message_text) {
-							let text = repairedData.result.input_message_content.message_text;
-							text = await markdownToMarkdownV2(text);
-							repairedData.result.input_message_content.message_text = repairMarkdownV2(text);
+					const incoming = data?.result?.input_message_content;
+					const markdown: string = incoming?.rich_message?.markdown ?? incoming?.message_text ?? '';
+					const withContent = (input_message_content: any) => ({
+						...data,
+						result: { ...data.result, input_message_content },
+					});
+
+					// Bot API 10.1: guest query results may carry a rich message,
+					// so tables, lists and code blocks render natively instead of
+					// being flattened to MarkdownV2.
+					if (markdown) {
+						try {
+							return await target.answerGuestQuery(
+								withContent({
+									rich_message: { markdown, blocks: markdownToRichBlocks(markdown) },
+								}),
+								signal,
+							);
+						} catch (e: any) {
+							if (!isFormattingError(e)) throw e;
+							console.warn(`[OptimisticApi] answerGuestQuery rejected the rich content, retrying as MarkdownV2. ${e.description ?? e}`);
 						}
-						return await target[prop](repairedData, signal);
+					}
+
+					try {
+						const converted = repairMarkdownV2(await markdownToMarkdownV2(markdown));
+						return await target.answerGuestQuery(
+							withContent({ message_text: converted, parse_mode: 'MarkdownV2' }),
+							signal,
+						);
 					} catch (e: any) {
 						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
 							console.warn(`[OptimisticApi] ${prop} failed, retrying with smart escaped text. Error: ${e.description}`);
-							const escapedData = { ...data };
-							if (escapedData?.result?.input_message_content) {
-								escapedData.result.input_message_content.message_text = smartSanitize(
-									escapedData.result.input_message_content.message_text
-								);
-							}
-							return await target[prop](escapedData, signal);
+							return await target.answerGuestQuery(
+								withContent({ message_text: smartSanitize(markdown), parse_mode: 'MarkdownV2' }),
+								signal,
+							);
 						}
 						throw e;
 					}
@@ -1115,6 +1172,78 @@ function stripLeadingQuote(text: string): string {
 }
 
 /**
+ * Deliver a streamed answer as an ephemeral message (Bot API 10.2/10.3).
+ *
+ * Telegram only accepts streamed drafts in private chats, so group answers are
+ * sent as an ephemeral rich message and edited in place as tokens arrive. The
+ * reply is visible only to the user who asked, keeping group chats readable.
+ *
+ * Delivery is best-effort: if the user is offline or Telegram rejects an edit,
+ * generation still finishes so the answer is stored in conversation history.
+ */
+async function streamEphemeralReply(
+	api: Api,
+	chatId: number | string,
+	receiverUserId: number,
+	stream: AsyncGenerator<string>,
+	params: Record<string, unknown>,
+): Promise<string> {
+	const optimistic = createOptimisticApi(api) as unknown as EphemeralDeliveryApi;
+	let ephemeralMessageId: number | undefined;
+	let lastContent = '';
+	let sentOnce = false;
+	let failed = false;
+
+	const send = (content: string) =>
+		optimistic.sendRichMessage({
+			...params,
+			chat_id: chatId,
+			ephemeral_message_parameters: { receiver_user_id: receiverUserId },
+			rich_message: { markdown: content },
+		});
+
+	const edit = (content: string) => {
+		if (ephemeralMessageId === undefined) return Promise.resolve();
+		return optimistic.editEphemeralMessageText({
+			chat_id: chatId,
+			receiver_user_id: receiverUserId,
+			ephemeral_message_id: ephemeralMessageId,
+			rich_message: { markdown: content },
+		});
+	};
+
+	for await (const content of stream) {
+		lastContent = content;
+		if (!content.trim() || failed) continue;
+		try {
+			if (ephemeralMessageId === undefined) {
+				const sent = await send(content);
+				ephemeralMessageId = sent.ephemeral_message_id;
+				sentOnce = true;
+				// The reply is only editable if Telegram returned its id.
+				if (ephemeralMessageId === undefined) failed = true;
+			} else {
+				await edit(content);
+			}
+		} catch (e) {
+			console.warn('[streamEphemeralReply] Failed to deliver ephemeral message:', e);
+			failed = true;
+		}
+	}
+
+	// A transient failure on the very first send must not discard the answer.
+	if (!sentOnce && lastContent.trim()) {
+		try {
+			await send(lastContent);
+		} catch (e) {
+			console.warn('[streamEphemeralReply] Final ephemeral delivery failed:', e);
+		}
+	}
+
+	return lastContent;
+}
+
+/**
  * Stream AI response to Telegram using the @grammyjs/stream plugin.
  */
 export async function streamAiResponseToTelegram(
@@ -1132,13 +1261,14 @@ export async function streamAiResponseToTelegram(
 	const throttled = adaptiveThrottled(rawStream);
 
 	// Bot API 10.3 stop button. Only ordinary private-chat streams carry a
-	// draft; guest and business replies are one-shot messages.
+	// draft; guest, business and ephemeral replies are one-shot messages.
 	const stopStore = ctx.env.CONVERSATION_HISTORY;
 	const stopKey = task.chatId ? generationStopKey(task.chatId, task.threadId) : undefined;
 	const canStop =
 		Boolean(stopStore && stopKey) &&
 		task.updateType !== 'guest_message' &&
-		task.updateType !== 'business_message';
+		task.updateType !== 'business_message' &&
+		!task.ephemeralReceiverId;
 	const stream = canStop
 		? stopWhenRequested(throttled, async () => {
 				try {
@@ -1200,6 +1330,11 @@ export async function streamAiResponseToTelegram(
 			business_connection_id: task.businessConnectionId,
 			reply_to_message_id: task.messageId,
 		});
+	} else if (task.ephemeralReceiverId && task.chatId) {
+		// Bot API 10.2: answers in group chats are ephemeral, so only the user
+		// who asked sees them. Drafts are private-chat only, so the reply is
+		// sent as a rich message and edited in place while it streams.
+		await streamEphemeralReply(ctx.api, Number(task.chatId), task.ephemeralReceiverId, wrappedStream, streamParams);
 	} else {
 		if (task.chatId) {
 			const draftIdOffset = task.updateId || Date.now();

@@ -1,4 +1,5 @@
 import { Bot, Api, Context, webhookCallback, GrammyError, HttpError, InputFile } from 'grammy';
+import type { EphemeralMessageParameters } from 'grammy/types';
 import { autoRetry } from '@grammyjs/auto-retry';
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
 import { Hono } from 'hono';
@@ -54,6 +55,19 @@ type MyContext = CommandsFlavor &
 		executionCtx: ExecutionCtx;
 	};
 
+/**
+ * Extra send options that make a reply visible only to its sender in group
+ * chats (Bot API 10.2). Private chats are unaffected.
+ */
+function ephemeralReply(ctx: MyContext): { ephemeral_message_parameters?: EphemeralMessageParameters } {
+	const chatType = ctx.chat?.type;
+	const senderId = ctx.from?.id ?? ctx.update.guest_message?.from?.id;
+	if ((chatType === 'group' || chatType === 'supergroup') && senderId) {
+		return { ephemeral_message_parameters: { receiver_user_id: senderId } };
+	}
+	return {};
+}
+
 export function createBotInstance(token: string): Bot<MyContext> {
 	const bot = new Bot<MyContext>(token);
 	bot.api.config.use(
@@ -77,6 +91,7 @@ const HELP_TEXT =
 	`Send a voice note - Transform your bot into a voice assistant (+${String(VOICE_SURCHARGE_STARS)} Stars)\n` +
 	'/clear - Clear your conversation history\n' +
 	'/commit - Get the latest deployed commit link\n\n' +
+	'In groups I answer with private, ephemeral replies that only you can see.\n\n' +
 	'New users start with 200 free credits!';
 
 async function getBusinessOwnerData(
@@ -221,6 +236,19 @@ async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) 
 	task.businessConnectionId = ctx.businessMessage?.business_connection_id?.toString();
 	task.threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
 
+	// Bot API 10.2: group answers are delivered as ephemeral messages so they
+	// are only visible to the user who asked. Business and guest replies have
+	// their own delivery paths.
+	const chatType = ctx.chat?.type;
+	if (
+		(chatType === 'group' || chatType === 'supergroup') &&
+		ctx.from?.id &&
+		!ctx.has('business_message') &&
+		!ctx.has('guest_message')
+	) {
+		task.ephemeralReceiverId = ctx.from.id;
+	}
+
 	if (ctx.update.update_id) {
 		const processedKey = `processed_update:${String(ctx.update.update_id)}`;
 		if (await ctx.env.CONVERSATION_HISTORY.get(processedKey)) {
@@ -310,149 +338,184 @@ async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) 
 function createCommands(): CommandGroup<MyContext> {
 	const commands = new CommandGroup<MyContext>();
 
-	commands.command('start', 'Welcome message and command list', async (ctx) => {
-		const isDev = ctx.env.ENVIRONMENT === 'dev';
-		await ctx.reply(HELP_TEXT + (isDev ? '' : '\n\nClick the button below to open the Web App!'), {
-			reply_markup: isDev
-				? undefined
-				: { inline_keyboard: [[{ text: 'Open Web App', web_app: { url: 'https://tux-robot.codebam.ca' } }]] },
-		});
-	});
+	commands
+		.command('start', 'Welcome message and command list', async (ctx) => {
+			const isDev = ctx.env.ENVIRONMENT === 'dev';
+			await ctx.reply(HELP_TEXT + (isDev ? '' : '\n\nClick the button below to open the Web App!'), {
+				...ephemeralReply(ctx),
+				reply_markup: isDev
+					? undefined
+					: {
+							inline_keyboard: [
+								[
+									{
+										text: 'Open Web App',
+										web_app: { url: 'https://tux-robot.codebam.ca' },
+										style: 'primary',
+									},
+								],
+							],
+						},
+			});
+		})
+		.ephemeral({ strict: false });
 
-	commands.command('balance', 'Check your current Star balance', async (ctx) => {
-		if (!ctx.from?.id) return;
-		const balance = await accountBalance(ctx.env, ctx.from.id);
-		await ctx.reply(`Your current balance is ${String(balance)} Stars.`);
-	});
+	commands
+		.command('balance', 'Check your current Star balance', async (ctx) => {
+			if (!ctx.from?.id) return;
+			const balance = await accountBalance(ctx.env, ctx.from.id);
+			await ctx.reply(`Your current balance is ${String(balance)} Stars.`, ephemeralReply(ctx));
+		})
+		.ephemeral({ strict: false });
 
-	commands.command('load', 'Top up your balance with Telegram Stars', async (ctx) => {
-		const amount = parseInt(ctx.match || '0', 10);
-		if (!Number.isInteger(amount) || amount <= 0 || amount > 1000) {
-			await ctx.reply('Please specify an amount between 1 and 1000 Stars. Example: /load 100');
-		} else {
-			await ctx.replyWithInvoice('Stars Top-up', `Purchase ${String(amount)} Stars`, `load:${String(amount)}`, 'XTR', [
-				{ label: 'Stars', amount },
-			]);
-		}
-	});
-
-	commands.command('photo', 'Generate an image', async (ctx) => {
-		const prompt = ctx.match;
-		if (prompt) {
-			await chargeStars(ctx, { type: 'gen_photo', prompt }, PHOTO_COST_STARS);
-		} else {
-			await ctx.reply('Please provide a prompt for the photo. Example: /photo a futuristic city');
-		}
-	});
-
-	commands.command('clear', 'Clear your conversation history', async (ctx) => {
-		const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
-		const { historyUserId } = await resolveIdentity(ctx);
-		const threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
-		await historyManager.clearHistory(historyUserId, threadId);
-		await ctx.reply('History cleared');
-	});
-
-	commands.command('model', 'Switch AI model and see costs', async (ctx) => {
-		const modelKey = `model:${String(ctx.from?.id)}`;
-		const selectedModel = ctx.match?.toLowerCase();
-		if (selectedModel) {
-			if (selectedModel in AVAILABLE_MODELS) {
-				await ctx.env.CONVERSATION_HISTORY.put(modelKey, selectedModel);
-				await ctx.reply(`Model updated to *${sanitizeMarkdownV2(selectedModel)}*\\.`, { parse_mode: 'MarkdownV2' });
+	commands
+		.command('load', 'Top up your balance with Telegram Stars', async (ctx) => {
+			const amount = parseInt(ctx.match || '0', 10);
+			if (!Number.isInteger(amount) || amount <= 0 || amount > 1000) {
+				await ctx.reply('Please specify an amount between 1 and 1000 Stars. Example: /load 100', ephemeralReply(ctx));
 			} else {
-				await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`);
+				await ctx.replyWithInvoice('Stars Top-up', `Purchase ${String(amount)} Stars`, `load:${String(amount)}`, 'XTR', [
+					{ label: 'Stars', amount },
+				]);
 			}
-		} else {
-			const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? DEFAULT_MODEL;
-			await ctx.reply(
-				`Current model: *${sanitizeMarkdownV2(currentModel)}*\n\n` +
-					`Available models:\n` +
-					Object.entries(AVAILABLE_MODELS)
-						.map(([name, cfg]) => `\\- \`${name.replace(/[`\\]/g, '\\$&')}\` \\(${String(cfg.cost)} Stars\\)`)
-						.join('\n'),
-				{ parse_mode: 'MarkdownV2' },
-			);
-		}
-	});
+		})
+		.ephemeral({ strict: false });
 
-	commands.command('prompt', 'Set your custom system prompt', async (ctx) => {
-		let promptValue = (ctx.match || '').trim();
-		const userId = String(ctx.from?.id);
-
-		if (promptValue === '') {
-			const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${userId}`);
-			await ctx.reply(`Current system prompt:\n\n${customPrompt || SYSTEM_PROMPTS.TUX_ROBOT}`);
-			return;
-		}
-
-		if (promptValue === 'reset' || promptValue === '""' || promptValue === "''") {
-			await ctx.env.CONVERSATION_HISTORY.delete(`prompt:${userId}`);
-			await ctx.reply(`System prompt reset to default:\n\n${SYSTEM_PROMPTS.TUX_ROBOT}`);
-		} else {
-			if (
-				(promptValue.startsWith('"') && promptValue.endsWith('"')) ||
-				(promptValue.startsWith("'") && promptValue.endsWith("'"))
-			) {
-				promptValue = promptValue.substring(1, promptValue.length - 1);
+	commands
+		.command('photo', 'Generate an image', async (ctx) => {
+			const prompt = ctx.match;
+			if (prompt) {
+				await chargeStars(ctx, { type: 'gen_photo', prompt }, PHOTO_COST_STARS);
+			} else {
+				await ctx.reply('Please provide a prompt for the photo. Example: /photo a futuristic city', ephemeralReply(ctx));
 			}
-			await ctx.env.CONVERSATION_HISTORY.put(`prompt:${userId}`, promptValue);
-			await ctx.reply(`System prompt updated to:\n\n${promptValue}`);
-		}
-	});
+		})
+		.ephemeral({ strict: false });
 
-	commands.command('facts', 'Set facts about yourself for business mode', async (ctx) => {
-		let factsValue = (ctx.match || '').trim();
-		const userId = ctx.from?.id;
-		if (!userId) return;
+	commands
+		.command('clear', 'Clear your conversation history', async (ctx) => {
+			const historyManager = new HistoryManager(ctx.env.CONVERSATION_HISTORY);
+			const { historyUserId } = await resolveIdentity(ctx);
+			const threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
+			await historyManager.clearHistory(historyUserId, threadId);
+			await ctx.reply('History cleared', ephemeralReply(ctx));
+		})
+		.ephemeral({ strict: false });
 
-		if (factsValue === '') {
-			const facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(userId)}`);
-			await ctx.reply(`Current business facts:\n\n${facts || 'No facts set.'}`);
-			return;
-		}
-
-		const syncAliases = async (value: string | null) => {
-			const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${String(userId)}`);
-			if (!connectionId) return;
-			const ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
-				`business_connection:${connectionId}`,
-				'json',
-			);
-			if (!ownerData) return;
-			for (const alias of [ownerData.username, ownerData.name]) {
-				if (!alias) continue;
-				if (value === null) await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${alias}`);
-				else await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${alias}`, value);
+	commands
+		.command('model', 'Switch AI model and see costs', async (ctx) => {
+			const modelKey = `model:${String(ctx.from?.id)}`;
+			const selectedModel = ctx.match?.toLowerCase();
+			if (selectedModel) {
+				if (selectedModel in AVAILABLE_MODELS) {
+					await ctx.env.CONVERSATION_HISTORY.put(modelKey, selectedModel);
+					await ctx.reply(`Model updated to *${sanitizeMarkdownV2(selectedModel)}*\\.`, {
+						...ephemeralReply(ctx),
+						parse_mode: 'MarkdownV2',
+					});
+				} else {
+					await ctx.reply(`Invalid model. Available models:\n${Object.keys(AVAILABLE_MODELS).join('\n')}`, ephemeralReply(ctx));
+				}
+			} else {
+				const currentModel = (await ctx.env.CONVERSATION_HISTORY.get<string>(modelKey)) ?? DEFAULT_MODEL;
+				await ctx.reply(
+					`Current model: *${sanitizeMarkdownV2(currentModel)}*\n\n` +
+						`Available models:\n` +
+						Object.entries(AVAILABLE_MODELS)
+							.map(([name, cfg]) => `\\- \`${name.replace(/[`\\]/g, '\\$&')}\` \\(${String(cfg.cost)} Stars\\)`)
+							.join('\n'),
+					{ ...ephemeralReply(ctx), parse_mode: 'MarkdownV2' },
+				);
 			}
-		};
+		})
+		.ephemeral({ strict: false });
 
-		if (factsValue === 'reset' || factsValue === '""' || factsValue === "''") {
-			await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${String(userId)}`);
-			await syncAliases(null);
-			await ctx.reply('Business facts cleared.');
-		} else {
-			if (
-				(factsValue.startsWith('"') && factsValue.endsWith('"')) ||
-				(factsValue.startsWith("'") && factsValue.endsWith("'"))
-			) {
-				factsValue = factsValue.substring(1, factsValue.length - 1);
+	commands
+		.command('prompt', 'Set your custom system prompt', async (ctx) => {
+			let promptValue = (ctx.match || '').trim();
+			const userId = String(ctx.from?.id);
+
+			if (promptValue === '') {
+				const customPrompt = await ctx.env.CONVERSATION_HISTORY.get(`prompt:${userId}`);
+				await ctx.reply(`Current system prompt:\n\n${customPrompt || SYSTEM_PROMPTS.TUX_ROBOT}`, ephemeralReply(ctx));
+				return;
 			}
-			await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${String(userId)}`, factsValue);
-			await syncAliases(factsValue);
-			await ctx.reply(`Business facts updated to:\n\n${factsValue}`);
-		}
-	});
 
-	commands.command('commit', 'Get the latest deployed commit link', async (ctx) => {
-		const commitSha = ctx.env.COMMIT_SHA || 'unknown';
-		if (commitSha === 'unknown' || commitSha === 'dev') {
-			await ctx.reply(`Commit: \`${commitSha}\``);
-		} else {
-			const link = `https://github.com/codebam/cf-workers-telegram-bot/commit/${commitSha}`;
-			await ctx.reply(`Latest deployed commit: [${commitSha.substring(0, 7)}](${link})`, { parse_mode: 'Markdown' });
-		}
-	});
+			if (promptValue === 'reset' || promptValue === '""' || promptValue === "''") {
+				await ctx.env.CONVERSATION_HISTORY.delete(`prompt:${userId}`);
+				await ctx.reply(`System prompt reset to default:\n\n${SYSTEM_PROMPTS.TUX_ROBOT}`, ephemeralReply(ctx));
+			} else {
+				if (
+					(promptValue.startsWith('"') && promptValue.endsWith('"')) ||
+					(promptValue.startsWith("'") && promptValue.endsWith("'"))
+				) {
+					promptValue = promptValue.substring(1, promptValue.length - 1);
+				}
+				await ctx.env.CONVERSATION_HISTORY.put(`prompt:${userId}`, promptValue);
+				await ctx.reply(`System prompt updated to:\n\n${promptValue}`, ephemeralReply(ctx));
+			}
+		})
+		.ephemeral({ strict: false });
+
+	commands
+		.command('facts', 'Set facts about yourself for business mode', async (ctx) => {
+			let factsValue = (ctx.match || '').trim();
+			const userId = ctx.from?.id;
+			if (!userId) return;
+
+			if (factsValue === '') {
+				const facts = await ctx.env.CONVERSATION_HISTORY.get(`business_facts:${String(userId)}`);
+				await ctx.reply(`Current business facts:\n\n${facts || 'No facts set.'}`, ephemeralReply(ctx));
+				return;
+			}
+
+			const syncAliases = async (value: string | null) => {
+				const connectionId = await ctx.env.CONVERSATION_HISTORY.get(`active_connection:${String(userId)}`);
+				if (!connectionId) return;
+				const ownerData = await ctx.env.CONVERSATION_HISTORY.get<{ id: number; name: string; username?: string }>(
+					`business_connection:${connectionId}`,
+					'json',
+				);
+				if (!ownerData) return;
+				for (const alias of [ownerData.username, ownerData.name]) {
+					if (!alias) continue;
+					if (value === null) await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${alias}`);
+					else await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${alias}`, value);
+				}
+			};
+
+			if (factsValue === 'reset' || factsValue === '""' || factsValue === "''") {
+				await ctx.env.CONVERSATION_HISTORY.delete(`business_facts:${String(userId)}`);
+				await syncAliases(null);
+				await ctx.reply('Business facts cleared.', ephemeralReply(ctx));
+			} else {
+				if (
+					(factsValue.startsWith('"') && factsValue.endsWith('"')) ||
+					(factsValue.startsWith("'") && factsValue.endsWith("'"))
+				) {
+					factsValue = factsValue.substring(1, factsValue.length - 1);
+				}
+				await ctx.env.CONVERSATION_HISTORY.put(`business_facts:${String(userId)}`, factsValue);
+				await syncAliases(factsValue);
+				await ctx.reply(`Business facts updated to:\n\n${factsValue}`, ephemeralReply(ctx));
+			}
+		})
+		.ephemeral({ strict: false });
+
+	commands
+		.command('commit', 'Get the latest deployed commit link', async (ctx) => {
+			const commitSha = ctx.env.COMMIT_SHA || 'unknown';
+			if (commitSha === 'unknown' || commitSha === 'dev') {
+				await ctx.reply(`Commit: \`${commitSha}\``, ephemeralReply(ctx));
+			} else {
+				const link = `https://github.com/codebam/cf-workers-telegram-bot/commit/${commitSha}`;
+				await ctx.reply(`Latest deployed commit: [${commitSha.substring(0, 7)}](${link})`, {
+					...ephemeralReply(ctx),
+					parse_mode: 'Markdown',
+				});
+			}
+		})
+		.ephemeral({ strict: false });
 
 	return commands;
 }
@@ -532,13 +595,16 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			const amount = parseInt(payload.slice(5), 10);
 			if (!Number.isInteger(amount) || amount <= 0) {
 				console.error(`[successful_payment] Malformed load payload: ${payload}`);
-				await ctx.reply('Something went wrong reading that top-up. Please contact support.');
+				await ctx.reply('Something went wrong reading that top-up. Please contact support.', ephemeralReply(ctx));
 				return;
 			}
 			const result = await accountCredit(ctx.env, userId, amount, 'load', {
 				description: 'Telegram Stars Top-up',
 			});
-			await ctx.reply(`Successfully loaded ${String(amount)} Stars! New balance: ${String(result.balance)} Stars.`);
+			await ctx.reply(
+				`Successfully loaded ${String(amount)} Stars! New balance: ${String(result.balance)} Stars.`,
+				ephemeralReply(ctx),
+			);
 			return;
 		}
 
@@ -549,10 +615,13 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 			console.error(`[successful_payment] Task ${payload} vanished after pre-checkout. Refunding.`);
 			try {
 				await ctx.api.refundStarPayment(userId, chargeId);
-				await ctx.reply('That request expired before it could run, so your Stars have been refunded.');
+				await ctx.reply('That request expired before it could run, so your Stars have been refunded.', ephemeralReply(ctx));
 			} catch (e) {
 				console.error('[successful_payment] Refund failed:', e);
-				await ctx.reply('Error: request expired and the automatic refund failed. Please contact support.');
+				await ctx.reply(
+					'Error: request expired and the automatic refund failed. Please contact support.',
+					ephemeralReply(ctx),
+				);
 			}
 			return;
 		}
@@ -591,6 +660,25 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		});
 	});
 
+	// Bot API 10.0 live photos: answer with the static photo part when the
+	// sender's client included one, otherwise fall back to the caption text.
+	bot.on('message:live_photo', async (ctx) => {
+		const livePhoto = ctx.message.live_photo;
+		const largest = livePhoto.photo?.[livePhoto.photo.length - 1];
+		if (largest) {
+			await chargeStars(ctx, {
+				type: 'photo',
+				prompt: buildPrompt(ctx) || 'Please describe this image',
+				fileId: largest.file_id,
+			});
+			return;
+		}
+		const prompt = buildPrompt(ctx);
+		if (prompt) {
+			await chargeStars(ctx, { type: 'tool_call', prompt });
+		}
+	});
+
 	bot.on('message:document', async (ctx) => {
 		await chargeStars(ctx, { type: 'tool_call', prompt: buildPrompt(ctx) });
 	});
@@ -606,6 +694,15 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 				type: 'photo',
 				prompt: buildPrompt(ctx) || 'Please describe this image',
 				fileId: photo[photo.length - 1].file_id,
+			});
+			return;
+		}
+		const livePhotoSize = ctx.businessMessage.live_photo?.photo?.slice(-1)[0];
+		if (livePhotoSize) {
+			await chargeStars(ctx, {
+				type: 'photo',
+				prompt: buildPrompt(ctx) || 'Please describe this image',
+				fileId: livePhotoSize.file_id,
 			});
 			return;
 		}
@@ -649,7 +746,17 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 					},
 					reply_markup: isDev
 						? undefined
-						: { inline_keyboard: [[{ text: 'Open Web App', url: 'https://tux-robot.codebam.ca' }]] },
+						: {
+								inline_keyboard: [
+									[
+										{
+											text: 'Open Web App',
+											url: 'https://tux-robot.codebam.ca',
+											style: 'primary',
+										},
+									],
+								],
+							},
 				});
 			} catch (e) {
 				console.error('[guest_message] Failed to answer guest query:', e);
@@ -747,6 +854,9 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 			console.error('[processTask] Failed to transcribe voice:', e);
 			await botInstance.api.sendMessage(task.chatId!, 'Failed to transcribe voice message.', {
 				business_connection_id: task.businessConnectionId,
+				ephemeral_message_parameters: task.ephemeralReceiverId
+					? { receiver_user_id: task.ephemeralReceiverId }
+					: undefined,
 				reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
 			});
 			throw e;
@@ -768,6 +878,9 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 		}
 		await botInstance.api.sendPhoto(task.chatId!, new InputFile(bytes, 'photo.png'), {
 			business_connection_id: task.businessConnectionId,
+			ephemeral_message_parameters: task.ephemeralReceiverId
+				? { receiver_user_id: task.ephemeralReceiverId }
+				: undefined,
 			reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
 		});
 		return;
@@ -889,6 +1002,9 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 								: 'Sorry, that request failed. Please try again.',
 							{
 								business_connection_id: task.businessConnectionId,
+								ephemeral_message_parameters: task.ephemeralReceiverId
+									? { receiver_user_id: task.ephemeralReceiverId }
+									: undefined,
 								reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
 							},
 						);

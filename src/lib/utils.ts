@@ -394,6 +394,9 @@ except Exception as e:
 							await api.sendDocument(Number(task.chatId), new InputFile(bytes, fileName), {
 								message_thread_id: task.threadId,
 								business_connection_id: task.businessConnectionId,
+								ephemeral_message_parameters: task.ephemeralReceiverId
+									? { receiver_user_id: task.ephemeralReceiverId }
+									: undefined,
 								caption: `Here is the requested file: \`${fileName}\``,
 								parse_mode: 'MarkdownV2',
 								reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
