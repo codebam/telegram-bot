@@ -14,7 +14,7 @@
 	},
 	"dependencies": {
 		"@cloudflare/ai-utils": "^1.0.1",
-		"hono": "^4.13.7",
+		"hono": "^4.13.8",
 		"@cloudflare/sandbox": "^0.12.9",
 		"@codebam/shared": "*",
 		"@grammyjs/auto-retry": "^2.0.2",
