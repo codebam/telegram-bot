@@ -993,23 +993,48 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 						description: 'Refund: generation failed',
 					});
 				}
-				if (task.chatId && task.telegramToken) {
+				const failureText = task.chargedAmount
+					? 'Sorry, that request failed. Your Stars have been refunded.'
+					: 'Sorry, that request failed. Please try again.';
+				if (task.telegramToken && task.updateType === 'guest_message' && task.guestQueryId) {
+					// A guest cannot be reached with sendMessage: the bot is not
+					// in that chat, and reply_parameters made the call fail even
+					// harder. answerGuestQuery is the only delivery path.
 					try {
-						await createBotInstance(task.telegramToken).api.sendMessage(
-							task.chatId,
-							task.chargedAmount
-								? 'Sorry, that request failed. Your Stars have been refunded.'
-								: 'Sorry, that request failed. Please try again.',
-							{
-								business_connection_id: task.businessConnectionId,
-								ephemeral_message_parameters: task.ephemeralReceiverId
-									? { receiver_user_id: task.ephemeralReceiverId }
-									: undefined,
-								reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+						await createBotInstance(task.telegramToken).api.raw.answerGuestQuery({
+							guest_query_id: task.guestQueryId,
+							result: {
+								type: 'article',
+								id: crypto.randomUUID(),
+								title: 'TuxRobot',
+								input_message_content: { message_text: failureText },
 							},
-						);
+						});
+					} catch (notifyErr) {
+						console.error('[BotWorkflow] Failed to answer guest of failure:', notifyErr);
+					}
+				} else if (task.chatId && task.telegramToken) {
+					const api = createBotInstance(task.telegramToken).api;
+					const params = {
+						business_connection_id: task.businessConnectionId,
+						ephemeral_message_parameters: task.ephemeralReceiverId
+							? { receiver_user_id: task.ephemeralReceiverId }
+							: undefined,
+					};
+					try {
+						await api.sendMessage(task.chatId, failureText, {
+							...params,
+							reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+						});
 					} catch (notifyErr) {
 						console.error('[BotWorkflow] Failed to notify user of failure:', notifyErr);
+						// The original message may have been deleted; without the
+						// reply target a plain message still reaches the user.
+						try {
+							await api.sendMessage(task.chatId, failureText, params);
+						} catch (retryErr) {
+							console.error('[BotWorkflow] Failed to send fallback failure notice:', retryErr);
+						}
 					}
 				}
 			});

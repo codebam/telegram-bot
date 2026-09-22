@@ -3,6 +3,7 @@ import { streamApi } from '@grammyjs/stream';
 import {
 	markdownToMarkdownV2,
 	markdownToRichBlocks,
+	normalizeToolArguments,
 	AVAILABLE_MODELS,
 	extractText,
 	extractThinking,
@@ -218,11 +219,12 @@ export async function customRunWithTools(
 
 			const options: Record<string, unknown> = {
 				messages: msgs.map((m) => {
-					// Ensure content is not null (use empty string if empty/null)
+					// Workers AI validators require `content` to be a string on
+					// every message, including assistant turns that only carry
+					// tool calls — the granite models reject null with a 5006
+					// oneOf error, which used to fail the whole turn.
 					const cleanMessage: any = { ...m };
-					if (cleanMessage.role === 'assistant' && cleanMessage.tool_calls && !cleanMessage.content) {
-						cleanMessage.content = null;
-					} else if (cleanMessage.content === null || cleanMessage.content === undefined) {
+					if (cleanMessage.content === null || cleanMessage.content === undefined) {
 						cleanMessage.content = '';
 					}
 					// Remove internal geminiParts before sending to CF
@@ -262,7 +264,19 @@ export async function customRunWithTools(
 		const isFinalTurn = turn >= 4 || cfTools.length === 0;
 		const shouldStream = isFinalTurn ? config.streamFinalResponse : false;
 		console.log(`[customRunWithTools] Turn:${turn} ShouldStream:${shouldStream} FinalTurn:${isFinalTurn}`);
-		const response = await runModel(messages, shouldStream, turn >= 4);
+
+		let response: Awaited<ReturnType<typeof runModel>>;
+		try {
+			response = await runModel(messages, shouldStream, turn >= 4);
+		} catch (e) {
+			// A model that rejects the tool-call transcript (e.g. Workers AI
+			// validators on granite) must not fail the whole reply. Retry the
+			// turn without tools so the user still gets an answer; the final
+			// turn already omits them, so its errors propagate.
+			if (isFinalTurn) throw e;
+			console.warn(`[customRunWithTools] Turn ${turn} failed with tools, retrying without tools:`, e);
+			response = await runModel(messages, config.streamFinalResponse, true);
+		}
 
 		if (shouldStream || (response && typeof (response as any).getReader === 'function')) {
 			return response as ReadableStream;
@@ -302,14 +316,10 @@ export async function customRunWithTools(
 				if (name.startsWith('functions.')) {
 					name = name.substring(10);
 				}
-				let args = call.arguments ?? call.function?.arguments ?? '';
-				if (typeof args !== 'string') {
-					try {
-						args = JSON.stringify(args);
-					} catch {
-						args = '{}';
-					}
-				}
+				// Some models double-encode the arguments (a JSON string that
+				// contains JSON); normalize so the transcript the model sees
+				// next turn, and the tool we call now, both get structured JSON.
+				const args = normalizeToolArguments(call.arguments ?? call.function?.arguments);
 				return {
 					id: call.id || `call_${Math.random().toString(36).substring(2, 9)}_${index}`,
 					type: 'function',
@@ -779,7 +789,8 @@ function createOptimisticApi(raw: any): any {
 
 					// Bot API 10.1: guest query results may carry a rich message,
 					// so tables, lists and code blocks render natively instead of
-					// being flattened to MarkdownV2.
+					// being flattened to MarkdownV2. Any other 400 (e.g. a client
+					// that cannot render rich content) degrades to the plain path.
 					if (markdown) {
 						try {
 							return await target.answerGuestQuery(
@@ -789,7 +800,7 @@ function createOptimisticApi(raw: any): any {
 								signal,
 							);
 						} catch (e: any) {
-							if (!isFormattingError(e)) throw e;
+							if (e?.error_code !== 400) throw e;
 							console.warn(`[OptimisticApi] answerGuestQuery rejected the rich content, retrying as MarkdownV2. ${e.description ?? e}`);
 						}
 					}
@@ -1303,16 +1314,23 @@ export async function streamAiResponseToTelegram(
 		for await (const chunk of wrappedStream) {
 			content = chunk;
 		}
+		// An empty generation must not reach Telegram: answerGuestQuery
+		// rejects a missing/empty message body and used to burn the whole
+		// workflow retry budget. Throwing lets the workflow refund instead.
+		const answer = stripThinking(content).trim();
+		if (!answer) {
+			throw new Error('Generation produced no content for guest query');
+		}
 		if (task.guestQueryId) {
 			await optimisticRaw.answerGuestQuery({
 				guest_query_id: task.guestQueryId,
 				result: {
 					type: 'article',
 					id: crypto.randomUUID(),
-					title: stripThinking(content).slice(0, 64),
+					title: answer.slice(0, 64),
 					input_message_content: {
-						message_text: content,
-						parse_mode: 'MarkdownV2', 
+						message_text: answer,
+						parse_mode: 'MarkdownV2',
 					},
 				}
 			});
