@@ -47,7 +47,8 @@ export function createThinkFilter() {
 			while (current.length > 0) {
 				if (inside) {
 					const closeMatch = current.match(/<\/([a-z]+)>/i);
-					if (closeMatch && THINK_TAGS.includes(closeMatch[1].toLowerCase())) {
+					const closeTag = closeMatch?.[1];
+					if (closeMatch && closeTag && THINK_TAGS.includes(closeTag.toLowerCase())) {
 						const closeIdx = closeMatch.index!;
 						current = current.slice(closeIdx + closeMatch[0].length);
 						inside = false;
@@ -63,7 +64,8 @@ export function createThinkFilter() {
 					}
 				} else {
 					const openMatch = current.match(/<([a-z]+)(?:\s[^>]*)?>/i);
-					if (openMatch && THINK_TAGS.includes(openMatch[1].toLowerCase())) {
+					const openTag = openMatch?.[1];
+					if (openMatch && openTag && THINK_TAGS.includes(openTag.toLowerCase())) {
 						const openIdx = openMatch.index!;
 						result += flush(current.slice(0, openIdx));
 						current = current.slice(openIdx + openMatch[0].length);
@@ -1178,7 +1180,7 @@ async function* snapshotsToDeltas(generator: AsyncGenerator<string>): AsyncGener
 function stripLeadingQuote(text: string): string {
 	const lines = text.split('\n');
 	let i = 0;
-	while (i < lines.length && (lines[i].startsWith('> ') || lines[i] === '>' || lines[i] === '')) i++;
+	while (i < lines.length && (lines[i]?.startsWith('> ') || lines[i] === '>' || lines[i] === '')) i++;
 	return i >= lines.length ? text.trim() : lines.slice(i).join('\n').trim();
 }
 

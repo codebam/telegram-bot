@@ -28,6 +28,7 @@ function extractPrintableStrings(buffer: ArrayBuffer): string {
 	let currentString = '';
 	for (let i = 0; i < bytes.length; i++) {
 		const byte = bytes[i];
+		if (byte === undefined) continue;
 		if ((byte >= 32 && byte <= 126) || byte === 10 || byte === 13 || byte === 9) {
 			currentString += String.fromCharCode(byte);
 		} else {
@@ -193,7 +194,7 @@ export async function parseTelegramFile(
 			const rows = csvText.split('\n').map(row => row.split(',').map(cell => cell.trim()));
 			if (rows.length > 0) {
 				const markdownRows = rows.map(cols => `| ${cols.join(' | ')} |`);
-				const headerSep = `| ${rows[0].map(() => '---').join(' | ')} |`;
+				const headerSep = `| ${rows[0]?.map(() => '---').join(' | ') ?? ''} |`;
 				rawText = [markdownRows[0], headerSep, ...markdownRows.slice(1)].join('\n');
 			} else {
 				rawText = csvText;
@@ -221,7 +222,7 @@ export async function parseTelegramFile(
 							const isSharedString = /t="s"/i.test(cellXml);
 							const valueMatch = cellXml.match(/<v>([^<]*)<\/v>/);
 							if (valueMatch) {
-								const val = valueMatch[1];
+								const val = valueMatch[1] ?? '';
 								if (isSharedString) {
 									const stringIdx = parseInt(val, 10);
 									rowCells.push(sharedStrings[stringIdx] || '');
@@ -237,8 +238,9 @@ export async function parseTelegramFile(
 						}
 					}
 					if (sheetTexts.length > 0) {
-						const headerSep = `| ${Array(sheetTexts[0].split('|').length - 2).fill('---').join(' | ')} |`;
-						rawText = [sheetTexts[0], headerSep, ...sheetTexts.slice(1)].join('\n');
+						const firstRow = sheetTexts[0] ?? '';
+						const headerSep = `| ${Array(Math.max(firstRow.split('|').length - 2, 0)).fill('---').join(' | ')} |`;
+						rawText = [firstRow, headerSep, ...sheetTexts.slice(1)].join('\n');
 					}
 				}
 			} catch (e) {
@@ -292,11 +294,12 @@ export async function parseTelegramFile(
 					})) as { data: number[][] };
 					if (res && res.data) {
 						res.data.forEach((vector, idx) => {
-							if (vector) {
+							const chunk = batchChunks[idx];
+							if (vector && chunk) {
 								cleanEmbedData.push({
 									index: i + idx,
 									vector,
-									chunk: batchChunks[idx]
+									chunk
 								});
 							}
 						});
@@ -433,6 +436,9 @@ export const createTelegramFileSearchTool = (
 				})) as { data: number[][] };
 
 				const queryVector = embedRes.data[0];
+				if (!queryVector) {
+					return 'Error: Failed to generate an embedding for the search query.';
+				}
 
 				console.log(`[search_telegram_file] Querying Vectorize for FileID: ${file_id}`);
 				let searchRes = await env.VECTORIZE.query(queryVector, {
