@@ -212,6 +212,16 @@ async function resolveSystemPrompt(ctx: MyContext, billingUserId: number): Promi
 }
 
 /**
+ * Registry entry for a model key (e.g. `glm-4.7-flash`). The registry is
+ * static, so a missing key is a programming error rather than a user error.
+ */
+function modelConfigByKey(key: string) {
+	const cfg = AVAILABLE_MODELS[key];
+	if (!cfg) throw new Error(`Unknown model key: ${key}`);
+	return cfg;
+}
+
+/**
  * Price, bill and enqueue a task.
  *
  * Billing goes through the `UserAccount` durable object so that two messages
@@ -262,15 +272,15 @@ async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) 
 		DEFAULT_MODEL;
 	const modelPreference =
 		(await ctx.env.CONVERSATION_HISTORY.get<string>(`model:${String(billingUserId)}`)) ?? defaultModel;
-	const preferred = AVAILABLE_MODELS[modelPreference] ?? AVAILABLE_MODELS[DEFAULT_MODEL];
+	const preferred = AVAILABLE_MODELS[modelPreference] ?? modelConfigByKey(DEFAULT_MODEL);
 
 	// Fall back to a capable model when the preference cannot handle the task,
 	// and price the request against whatever model actually runs.
 	let effective = preferred;
 	if (task.type === 'tool_call' && !preferred.supportsTools) {
-		effective = AVAILABLE_MODELS[defaultModel] ?? AVAILABLE_MODELS[DEFAULT_MODEL];
+		effective = AVAILABLE_MODELS[defaultModel] ?? modelConfigByKey(DEFAULT_MODEL);
 	} else if ((task.type === 'photo' || task.geminiParts?.some((p) => p.inlineData)) && !preferred.supportsVision) {
-		effective = AVAILABLE_MODELS[VISION_FALLBACK_MODEL];
+		effective = modelConfigByKey(VISION_FALLBACK_MODEL);
 	}
 	task.modelId = effective.id;
 
@@ -653,6 +663,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	bot.on('message:photo', async (ctx) => {
 		const photo = ctx.message.photo;
 		const largest = photo[photo.length - 1];
+		if (!largest) return;
 		await chargeStars(ctx, {
 			type: 'photo',
 			prompt: buildPrompt(ctx) || 'Please describe this image',
@@ -690,10 +701,12 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	bot.on('business_message', async (ctx) => {
 		const photo = ctx.businessMessage.photo;
 		if (photo) {
+			const largest = photo[photo.length - 1];
+			if (!largest) return;
 			await chargeStars(ctx, {
 				type: 'photo',
 				prompt: buildPrompt(ctx) || 'Please describe this image',
-				fileId: photo[photo.length - 1].file_id,
+				fileId: largest.file_id,
 			});
 			return;
 		}
@@ -916,7 +929,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 		...(task.history || []),
 		userMessage,
 	];
-	const modelId = task.modelId || AVAILABLE_MODELS[DEFAULT_MODEL].id;
+	const modelId = task.modelId || modelConfigByKey(DEFAULT_MODEL).id;
 	const modelConfig = modelConfigById(modelId);
 
 	// Models without tool support choke on a tools array; only offer tools to
@@ -1160,7 +1173,7 @@ app.post('/workflow', async (c) => {
 	// Price from the model registry, never from the request.
 	const requested = modelConfigById(task.modelId);
 	const preferenceKey = (await c.env.CONVERSATION_HISTORY.get<string>(`model:${String(userId)}`)) ?? DEFAULT_MODEL;
-	const modelConfig = requested ?? AVAILABLE_MODELS[preferenceKey] ?? AVAILABLE_MODELS[DEFAULT_MODEL];
+	const modelConfig = requested ?? AVAILABLE_MODELS[preferenceKey] ?? modelConfigByKey(DEFAULT_MODEL);
 	task.modelId = modelConfig.id;
 
 	const charge = await accountCharge(c.env, userId, modelConfig.cost, {
