@@ -1,12 +1,12 @@
-import { Bot, Api, Context, webhookCallback, GrammyError, HttpError, InputFile } from 'grammy';
+import { Bot, type Api, type Context, webhookCallback, GrammyError, HttpError, InputFile } from 'grammy';
 import type { EphemeralMessageParameters } from 'grammy/types';
 import { autoRetry } from '@grammyjs/auto-retry';
-import { WorkflowEntrypoint, WorkflowStep, type WorkflowEvent } from 'cloudflare:workers';
+import { WorkflowEntrypoint, type WorkflowStep, type WorkflowEvent } from 'cloudflare:workers';
 import { Hono } from 'hono';
 
 /** Minimal surface of the Workers execution context; hono's `c.executionCtx` satisfies it. */
 type ExecutionCtx = {
-	waitUntil(promise: Promise<any>): void;
+	waitUntil(promise: Promise<unknown>): void;
 	passThroughOnException(): void;
 };
 
@@ -49,9 +49,18 @@ function secretsMatch(a: string | undefined | null, b: string | undefined | null
 	return diff === 0;
 }
 
+/**
+ * `Environment` from @codebam/shared still declares `STREAM_WORKFLOW: any`;
+ * override it locally with the binding type wrangler generates until shared
+ * is tightened, so the workflow handle stays fully typed.
+ */
+type BotEnvironment = Omit<Environment, 'STREAM_WORKFLOW'> & {
+	STREAM_WORKFLOW: Workflow<Parameters<BotWorkflow['run']>[0]['payload']>;
+};
+
 type MyContext = CommandsFlavor &
 	Context & {
-		env: Environment;
+		env: BotEnvironment;
 		executionCtx: ExecutionCtx;
 	};
 
@@ -734,7 +743,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 	});
 
 	bot.on('guest_message', async (ctx) => {
-		const guestMessage = ctx.update.guest_message!;
+		const guestMessage = ctx.update.guest_message;
 		let prompt = guestMessage.text?.toString() ?? '';
 		const token = ctx.env.SECRET_TELEGRAM_API_TOKEN;
 		let botUsername = await ctx.env.CONVERSATION_HISTORY.get(`bot_username:${token.slice(0, 10)}`);
@@ -824,18 +833,18 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 
 /** Build the tool list for a task, honouring feature flags and model support. */
 function buildTools(env: Environment, task: Task, messages: ChatMessage[], modelId: string, api: Api, opts: { sandbox: boolean; tavily: boolean }): Tool[] {
-	const tools: Tool[] = [fetchTool as unknown as Tool, wikipediaTool as unknown as Tool];
+	const tools: Tool[] = [fetchTool, wikipediaTool];
 	if (opts.tavily && env.TAVILY_API_KEY) {
-		tools.push(createTavilySearchTool(env.TAVILY_API_KEY) as unknown as Tool);
+		tools.push(createTavilySearchTool(env.TAVILY_API_KEY));
 	}
 	if (opts.sandbox) {
-		tools.push(createSandboxTool(env, env.Sandbox as any, String(task.userId)) as unknown as Tool);
+		tools.push(createSandboxTool(env, env.Sandbox, String(task.userId)));
 		tools.push(
-			createTelegramFileReaderTool(env, env.Sandbox as any, String(task.userId), messages, modelId) as unknown as Tool,
+			createTelegramFileReaderTool(env, env.Sandbox, String(task.userId), messages, modelId),
 		);
-		tools.push(createCodeWorkspaceTool(env, env.Sandbox as any, String(task.userId), api, task) as unknown as Tool);
+		tools.push(createCodeWorkspaceTool(env, env.Sandbox, String(task.userId), api, task));
 	}
-	tools.push(createTelegramFileSearchTool(env, String(task.userId), modelId) as unknown as Tool);
+	tools.push(createTelegramFileSearchTool(env, String(task.userId), modelId));
 	return tools;
 }
 
@@ -930,7 +939,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 					{ inlineData: { mimeType: 'image/jpeg', data: base64Data } },
 				];
 				try {
-					const sandbox = getSandbox(env.Sandbox as any, String(task.userId));
+					const sandbox = getSandbox(env.Sandbox, String(task.userId));
 					await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
 				} catch (se) {
 					console.warn(`[processTask] Sandbox not bound or failed writing image:`, se);
@@ -1122,7 +1131,7 @@ async function authenticate(c: { req: { header: (k: string) => string | undefine
 
 app.post('/verify', async (c) => {
 	try {
-		const body = (await c.req.json()) as { authProof?: string };
+		const body = await c.req.json<{ authProof?: string }>();
 		const { valid, userId } = await verifyTelegramAuth(body.authProof, c.env.SECRET_TELEGRAM_API_TOKEN);
 		if (valid && userId) {
 			return c.json({ valid: true, userId }, 200);
@@ -1148,7 +1157,7 @@ app.post('/api/account/charge', async (c) => {
 
 	let body: { amount?: number; description?: string };
 	try {
-		body = (await c.req.json()) as { amount?: number; description?: string };
+		body = await c.req.json<{ amount?: number; description?: string }>();
 	} catch {
 		return c.json({ error: 'Invalid JSON' }, 400);
 	}
@@ -1173,7 +1182,7 @@ app.post('/workflow', async (c) => {
 
 	let task: Task;
 	try {
-		task = (await c.req.json()) as Task;
+		task = await c.req.json<Task>();
 	} catch {
 		return c.text('Invalid JSON', 400);
 	}
@@ -1231,7 +1240,7 @@ app.post('/workflow', async (c) => {
 							{ inlineData: { mimeType: 'image/jpeg', data: base64Data } },
 						];
 						try {
-							const sandbox = getSandbox(c.env.Sandbox as any, String(userId));
+							const sandbox = getSandbox(c.env.Sandbox, String(userId));
 							await sandbox.writeFile('/workspace/uploaded_image.png', base64Data);
 						} catch (se) {
 							console.warn(`[Workflow] Sandbox not bound or failed writing image:`, se);
@@ -1337,8 +1346,8 @@ app.all('*', async (c) => {
 				console.warn('[setWebhook] Failed to publish command menu:', commandErr);
 			}
 			return c.json({ ok: result });
-		} catch (e: any) {
-			return c.json({ ok: false, error: e.message }, 500);
+		} catch (e) {
+			return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500);
 		}
 	}
 
@@ -1356,7 +1365,7 @@ app.all('*', async (c) => {
 				timeoutMilliseconds: 15_000,
 				onTimeout: 'return',
 			})(c);
-		} catch (e: any) {
+		} catch (e) {
 			console.error('[Fetch-Webhook-Error] Error during webhook update handling:', e);
 			if (e instanceof GrammyError) {
 				console.error(`[Fetch-Webhook-Error] GrammyError: ${e.method}, ${e.error_code}, ${e.description}`);
