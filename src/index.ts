@@ -50,9 +50,9 @@ function secretsMatch(a: string | undefined | null, b: string | undefined | null
 }
 
 /**
- * `Environment` from @codebam/shared still declares `STREAM_WORKFLOW: any`;
- * override it locally with the binding type wrangler generates until shared
- * is tightened, so the workflow handle stays fully typed.
+ * `Environment` from @codebam/shared types `STREAM_WORKFLOW` as a bare
+ * `Workflow`, which drops the payload type; pin it locally to the binding type
+ * wrangler generates so the workflow handle stays fully typed.
  */
 type BotEnvironment = Omit<Environment, 'STREAM_WORKFLOW'> & {
 	STREAM_WORKFLOW: Workflow<Parameters<BotWorkflow['run']>[0]['payload']>;
