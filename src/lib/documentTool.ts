@@ -155,7 +155,7 @@ export async function parseTelegramFile(
 					const matches = documentXml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
 					rawText = matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ').trim();
 				}
-			} catch (e) {
+			} catch {
 				console.log(`[parseTelegramFile] JSZip failed for DOCX/DOC. Falling back to legacy binary string extraction...`);
 				rawText = extractPrintableStrings(arrayBuffer);
 			}
@@ -183,7 +183,7 @@ export async function parseTelegramFile(
 					}
 				}
 				rawText = slideTexts.join('\n\n');
-			} catch (e) {
+			} catch {
 				console.log(`[parseTelegramFile] JSZip failed for PPTX/PPT. Falling back to legacy binary string extraction...`);
 				rawText = extractPrintableStrings(arrayBuffer);
 			}
@@ -243,7 +243,7 @@ export async function parseTelegramFile(
 						rawText = [firstRow, headerSep, ...sheetTexts.slice(1)].join('\n');
 					}
 				}
-			} catch (e) {
+			} catch {
 				console.log(`[parseTelegramFile] JSZip failed for XLSX. Falling back to legacy binary string extraction...`);
 				rawText = extractPrintableStrings(arrayBuffer);
 			}
