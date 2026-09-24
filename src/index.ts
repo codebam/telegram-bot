@@ -1,7 +1,7 @@
 import { Bot, Api, Context, webhookCallback, GrammyError, HttpError, InputFile } from 'grammy';
 import type { EphemeralMessageParameters } from 'grammy/types';
 import { autoRetry } from '@grammyjs/auto-retry';
-import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
+import { WorkflowEntrypoint, WorkflowStep, type WorkflowEvent } from 'cloudflare:workers';
 import { Hono } from 'hono';
 
 /** Minimal surface of the Workers execution context; hono's `c.executionCtx` satisfies it. */
@@ -980,7 +980,7 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 }
 
 export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
-	async run(event: WorkflowEvent<Task>, step: WorkflowStep) {
+	override async run(event: WorkflowEvent<Task>, step: WorkflowStep) {
 		const task = event.payload;
 
 		if (
@@ -1108,6 +1108,7 @@ app.use('*', async (c, next) => {
 		}
 	}
 	await next();
+	return;
 });
 
 /**
