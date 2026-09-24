@@ -50,14 +50,14 @@ export const wikipediaTool = {
 				headers: { 'User-Agent': userAgent },
 			});
 			if (res.status === 200) {
-				const data = (await res.json()) as {
+				const data = await res.json<{
 					query?: {
 						search?: Array<{
 							title: string;
 							snippet: string;
 						}>;
 					};
-				};
+				}>();
 				if (data && data.query && Array.isArray(data.query.search)) {
 					const wikiResults = data.query.search.map((item) => ({
 						title: item.title,
@@ -105,9 +105,9 @@ export const createTavilySearchTool = (apiKey: string) => ({
 			if (!res.ok) {
 				return `Error executing Tavily search: HTTP ${res.status}`;
 			}
-			const data = (await res.json()) as {
+			const data = await res.json<{
 				results?: Array<{ title: string; url: string; content: string }>;
-			};
+			}>();
 			if (data.results && data.results.length > 0) {
 				return JSON.stringify(
 					data.results.map((r) => ({
@@ -141,7 +141,7 @@ export function isSafeFileName(name: string): boolean {
 
 export async function syncUserSandboxWorkspace(userId: string, env: Environment): Promise<void> {
 	try {
-		const sandbox = getSandbox(env.Sandbox as any, userId);
+		const sandbox = getSandbox(env.Sandbox, userId);
 		const uploadsList = await env.R2.list({ prefix: `uploads/${userId}/` });
 		const activeFileNames: string[] = [];
 
@@ -384,7 +384,7 @@ except Exception as e:
 							console.log(`[CodeWorkspace] Document ${fileName} already sent for update ${task.updateId}. Skipping.`);
 							fileSentMsg = `\nSkipped sending ${output_file} as it was already sent.`;
 						} else {
-							const binaryString = atob(contentBase64 as string);
+							const binaryString = atob(contentBase64);
 							const bytes = new Uint8Array(binaryString.length);
 							for (let i = 0; i < binaryString.length; i++) {
 								bytes[i] = binaryString.charCodeAt(i);
@@ -416,7 +416,7 @@ except Exception as e:
 					fileSent: fileSentMsg
 				});
 
-			} catch (e: any) {
+			} catch (e) {
 				console.error(`[CodeWorkspace] Error in tool execution:`, e);
 				return `Error executing workspace task: ${String(e)}`;
 			}
