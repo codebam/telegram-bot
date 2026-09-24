@@ -7,10 +7,18 @@
 		"build": "npx wrangler types --check",
 		"deploy": "npx wrangler deploy",
 		"start": "npx wrangler dev",
-		"check": "tsc --noEmit"
+		"check": "tsc --noEmit",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix"
 	},
 	"devDependencies": {
-		"typescript": "^6.0.3"
+		"@eslint/compat": "^2.1.1",
+		"@eslint/js": "^10.0.1",
+		"eslint": "^10.11.0",
+		"eslint-config-prettier": "^10.1.8",
+		"globals": "^17.12.0",
+		"typescript": "^6.0.3",
+		"typescript-eslint": "^8.70.1"
 	},
 	"dependencies": {
 		"@cloudflare/ai-utils": "^1.0.1",
