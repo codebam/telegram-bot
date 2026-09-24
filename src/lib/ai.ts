@@ -140,10 +140,10 @@ export async function customRunWithTools(
 			if (!supportsVision) {
 				const textParts = m.geminiParts.filter(p => !p.inlineData);
 				const firstText = textParts.find(p => p.text)?.text || m.content;
+				const { geminiParts: _geminiParts, ...rest } = m;
 				return {
-					...m,
-					content: firstText,
-					geminiParts: undefined
+					...rest,
+					...(firstText === undefined ? {} : { content: firstText })
 				};
 			} else if (!isGemini) {
 				const hasImage = m.geminiParts.some(p => p.inlineData);
@@ -166,10 +166,10 @@ export async function customRunWithTools(
 							});
 						}
 					}
+					const { geminiParts: _geminiParts, ...rest } = m;
 					return {
-						...m,
-						content: contentParts as any,
-						geminiParts: undefined
+						...rest,
+						content: contentParts as any
 					};
 				}
 			}
@@ -1305,8 +1305,10 @@ export async function streamAiResponseToTelegram(
 	})();
 
 	const streamParams = {
-		message_thread_id: task.threadId,
-		business_connection_id: task.businessConnectionId,
+		...(task.threadId === undefined ? {} : { message_thread_id: task.threadId }),
+		...(task.businessConnectionId === undefined
+			? {}
+			: { business_connection_id: task.businessConnectionId }),
 	};
 
 	const optimisticRaw = createOptimisticApi(ctx.api.raw);
@@ -1369,7 +1371,7 @@ export async function streamAiResponseToTelegram(
 				{ ...streamParams, can_stop: true, keep_on_stop: true },
 				{
 					...streamParams,
-					reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+					...(task.messageId ? { reply_parameters: { message_id: task.messageId } } : {}),
 				},
 			);
 		}
