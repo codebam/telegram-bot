@@ -16,6 +16,7 @@ import {
 	type GeminiPart,
 	type NormalizedToolCall,
 	type RawToolCall,
+	type RichBlock,
 	type Task,
 	type Tool,
 } from '@codebam/shared';
@@ -105,6 +106,49 @@ export function createThinkFilter() {
 	};
 }
 
+/** Narrow a dynamic value to a plain object record (parsed JSON, API payloads). */
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null;
+}
+
+/** True when a value is a readable byte stream (Workers AI responses, `Response.body`). */
+function isByteStream(value: unknown): value is ReadableStream<Uint8Array> {
+	return typeof value === 'object' && value !== null && 'getReader' in value && typeof value.getReader === 'function';
+}
+
+/** True when a value carries a readable byte stream on its `body` property. */
+function hasStreamBody(value: unknown): value is { body: ReadableStream<Uint8Array> } {
+	return typeof value === 'object' && value !== null && 'body' in value && isByteStream(value.body);
+}
+
+/** True when a model result is tagged with the `tool` role (dynamic response guard). */
+function isToolRoleResponse(value: unknown): boolean {
+	return typeof value === 'object' && value !== null && 'role' in value && value.role === 'tool';
+}
+
+/** Input accepted by the shared `extractText`/`extractThinking`/`extractReasoning` helpers. */
+type ExtractInput = string | AiResponse | Record<string, unknown> | null | undefined;
+
+/**
+ * Parsed model stream event: the OpenAI-compatible / Gemini chunk shapes plus
+ * the `finish_reason` fields this module reads.
+ */
+type StreamEvent = AiResponse & {
+	choices?: (NonNullable<AiResponse['choices']>[number] & { finish_reason?: string })[];
+	candidates?: (NonNullable<AiResponse['candidates']>[number] & { finish_reason?: string })[];
+};
+
+/** Narrow a JSON.parse result to a stream event record. */
+function isStreamEvent(value: unknown): value is StreamEvent {
+	return typeof value === 'object' && value !== null;
+}
+
+/** JSON.parse output in the shape the shared extractors accept (bare strings pass through). */
+function asExtractInput(value: unknown): ExtractInput {
+	if (typeof value === 'string') return value;
+	return isStreamEvent(value) ? value : undefined;
+}
+
 interface AiRunner {
 	run(model: string, inputs: Record<string, unknown>): Promise<AiResponse | ReadableStream | Response>;
 }
@@ -119,6 +163,26 @@ function createMockStream(text: string): ReadableStream {
 		}
 	});
 }
+
+/** OpenAI-compatible content part used when a vision message goes to a non-Gemini model. */
+type ContentPart =
+	| { type: 'text'; text: string }
+	| { type: 'image_url'; image_url: { url: string } };
+
+/**
+ * Chat message as it moves through the tool-calling transcript. Unlike the
+ * wire-level {@link ChatMessage}, `content` may also be a list of parts (for
+ * vision models) or null (assistant turns that only carry tool calls).
+ */
+type TranscriptMessage = Omit<ChatMessage, 'content'> & {
+	content?: string | null | ContentPart[];
+};
+
+/** Function-tool definition sent to the Cloudflare Workers AI API. */
+type CfTool = { name: string; description: string; parameters: Record<string, unknown> };
+
+/** OpenAI-compatible function-tool wrapper; `name` mirrors the flat tool shape. */
+type WireTool = { type: 'function'; function: CfTool; name?: string };
 
 /**
  * Custom runner that supports tool calls across different AI models.
@@ -135,7 +199,7 @@ export async function customRunWithTools(
 	const supportsVision = modelConfig?.supportsVision || false;
 	const isGemini = model.includes('google/gemini');
 
-	const messages: ChatMessage[] = input.messages.map((m) => {
+	const messages: TranscriptMessage[] = input.messages.map((m) => {
 		if (m.geminiParts) {
 			if (!supportsVision) {
 				const textParts = m.geminiParts.filter(p => !p.inlineData);
@@ -148,7 +212,7 @@ export async function customRunWithTools(
 			} else if (!isGemini) {
 				const hasImage = m.geminiParts.some(p => p.inlineData);
 				if (hasImage) {
-					const contentParts: any[] = [];
+					const contentParts: ContentPart[] = [];
 					const textPart = m.geminiParts.find(p => p.text);
 					if (textPart && textPart.text) {
 						contentParts.push({ type: 'text', text: textPart.text });
@@ -169,7 +233,7 @@ export async function customRunWithTools(
 					const { geminiParts: _geminiParts, ...rest } = m;
 					return {
 						...rest,
-						content: contentParts as any
+						content: contentParts
 					};
 				}
 			}
@@ -179,13 +243,13 @@ export async function customRunWithTools(
 
 	const tools = input.tools || [];
 
-	const cfTools = tools.map((t) => ({
+	const cfTools: CfTool[] = tools.map((t) => ({
 		name: t.name,
 		description: t.description,
 		parameters: t.parameters,
 	}));
 
-	const runModel = async (msgs: ChatMessage[], stream: boolean, omitTools = false) => {
+	const runModel = async (msgs: TranscriptMessage[], stream: boolean, omitTools = false) => {
 		console.log(`[customRunWithTools] runModel starting. Stream: ${stream}, Model: ${model}, OmitTools: ${omitTools}`);
 		console.log(`[customRunWithTools] msgs passed to Cloudflare:`, JSON.stringify(msgs));
 		try {
@@ -204,7 +268,7 @@ export async function customRunWithTools(
 
 						const role = m.role === 'assistant' ? 'model' : 'user';
 						const parts: GeminiPart[] = [];
-						if (m.content) parts.push({ text: m.content });
+						if (typeof m.content === 'string' && m.content) parts.push({ text: m.content });
 						return { role, parts };
 					}),
 					tools: (!omitTools && cfTools.length > 0) ? [{ functionDeclarations: cfTools }] : undefined,
@@ -219,21 +283,27 @@ export async function customRunWithTools(
 				return await ai.run(model, geminiInput);
 			}
 
+			const cleanMessages: TranscriptMessage[] = msgs.map((m) => {
+				// Workers AI validators require `content` to be a string on
+				// every message, including assistant turns that only carry
+				// tool calls — the granite models reject null with a 5006
+				// oneOf error, which used to fail the whole turn.
+				const cleanMessage: TranscriptMessage = { ...m };
+				if (cleanMessage.content === null || cleanMessage.content === undefined) {
+					cleanMessage.content = '';
+				}
+				// Remove internal geminiParts before sending to CF
+				delete cleanMessage.geminiParts;
+				return cleanMessage;
+			});
+
+			const wireTools: WireTool[] | undefined = (!omitTools && cfTools.length > 0)
+				? cfTools.map((t) => ({ type: 'function', function: t }))
+				: undefined;
+
 			const options: Record<string, unknown> = {
-				messages: msgs.map((m) => {
-					// Workers AI validators require `content` to be a string on
-					// every message, including assistant turns that only carry
-					// tool calls — the granite models reject null with a 5006
-					// oneOf error, which used to fail the whole turn.
-					const cleanMessage: any = { ...m };
-					if (cleanMessage.content === null || cleanMessage.content === undefined) {
-						cleanMessage.content = '';
-					}
-					// Remove internal geminiParts before sending to CF
-					delete cleanMessage.geminiParts;
-					return cleanMessage;
-				}),
-				tools: (!omitTools && cfTools.length > 0) ? cfTools.map((t) => ({ type: 'function', function: t })) : undefined,
+				messages: cleanMessages,
+				tools: wireTools,
 				tool_choice: (!omitTools && cfTools.length > 0) ? 'auto' : undefined,
 				max_tokens: 65536,
 				stream,
@@ -241,16 +311,16 @@ export async function customRunWithTools(
 
 			console.log(`[customRunWithTools] Calling ai.run with options:`, JSON.stringify({
 				...options,
-				messages: (options['messages'] as any[]).map(m => ({ role: m.role, contentLength: m.content?.length, keys: Object.keys(m) })),
-				tools: options['tools'] ? (options['tools'] as any[]).map(t => t.function?.name || t.name) : undefined
+				messages: cleanMessages.map(m => ({ role: m.role, contentLength: m.content?.length, keys: Object.keys(m) })),
+				tools: wireTools ? wireTools.map(t => t.function?.name || t.name) : undefined
 			}));
 
 			const result = await ai.run(model, options);
-			const isStream = result && (typeof (result as any).getReader === 'function' || (typeof (result as any).body?.getReader === 'function'));
+			const isStream = isByteStream(result) || hasStreamBody(result);
 			console.log(`[customRunWithTools] ai.run returned. Type: ${typeof result}, isStream: ${isStream}, Keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') : 'none'}`);
 			
 			if (stream && !isStream) {
-				if (result && typeof result === 'object' && 'body' in result && result.body && typeof (result.body as any).getReader === 'function') {
+				if (hasStreamBody(result)) {
 					return result.body;
 				}
 			}
@@ -280,7 +350,7 @@ export async function customRunWithTools(
 			response = await runModel(messages, config.streamFinalResponse, true);
 		}
 
-		if (shouldStream || (response && typeof (response as any).getReader === 'function')) {
+		if (shouldStream || isByteStream(response)) {
 			return response as ReadableStream;
 		}
 
@@ -329,7 +399,7 @@ export async function customRunWithTools(
 				};
 			});
 
-			const assistantMessage: any = {
+			const assistantMessage: TranscriptMessage = {
 				role: 'assistant',
 				content: responseText || null,
 				tool_calls: normalizedToolCalls,
@@ -438,13 +508,13 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 	const response = await customRunWithTools(ai, model, { messages, tools }, { streamFinalResponse: true });
 	const filter = createThinkFilter();
 
-	if (response && (response as any).role === 'tool') {
+	if (isToolRoleResponse(response)) {
 		console.log('[runStream] customRunWithTools returned a tool response unexpectedly');
 		return;
 	}
 
-	if (response && typeof (response as any).getReader === 'function') {
-		const reader = (response as ReadableStream).getReader();
+	if (isByteStream(response)) {
+		const reader = response.getReader();
 		const decoder = new TextDecoder();
 		let buffer = '';
 		let chunkCount = 0;
@@ -455,7 +525,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 		let pendingReasoning = '';
 		let lastYieldTime = Date.now();
 
-		const flushPending = async function* (): AsyncGenerator<StreamChunk, void, unknown> {
+		const flushPending = function* (): Generator<StreamChunk, void, unknown> {
 			if (pendingThinking) {
 				yield { type: 'thinking', text: pendingThinking };
 				pendingThinking = '';
@@ -513,23 +583,26 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 							break;
 						}
 						try {
-							const parsed = JSON.parse(data);
+							const parsed: unknown = JSON.parse(data);
+							// Model output is dynamic: strings pass through, objects become events.
+							const event = asExtractInput(parsed);
+							const streamEvent = isStreamEvent(parsed) ? parsed : undefined;
 							
-							const thinking = extractThinking(parsed);
+							const thinking = extractThinking(event);
 							if (thinking) {
 								onStatusUpdate?.('Thinking');
 								pendingThinking += thinking;
 							}
 
-							const reasoning = extractReasoning(parsed);
+							const reasoning = extractReasoning(event);
 							if (reasoning) {
 								onStatusUpdate?.('Reasoning');
 								pendingReasoning += reasoning;
 							}
 
-							const text = extractText(parsed);
-							const choice = parsed.choices?.[0];
-							const finishReason = choice?.finish_reason || parsed.candidates?.[0]?.finish_reason || '';
+							const text = extractText(event);
+							const choice = streamEvent?.choices?.[0];
+							const finishReason = choice?.finish_reason || streamEvent?.candidates?.[0]?.finish_reason || '';
 							
 							if (chunkCount % 50 === 0 || finishReason) {
 								console.log(`[runStream] C:${chunkCount} L:${text.length} FR:${finishReason} hasT:${!!text} hasR:${!!reasoning}`);
@@ -544,20 +617,21 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 						}
 					} else if (trimmed.startsWith('{')) {
 						try {
-							const parsed = JSON.parse(trimmed);
-							const thinking = extractThinking(parsed);
+							const parsed: unknown = JSON.parse(trimmed);
+							const event = asExtractInput(parsed);
+							const thinking = extractThinking(event);
 							if (thinking) {
 								onStatusUpdate?.('Thinking');
 								pendingThinking += thinking;
 							}
 
-							const reasoning = extractReasoning(parsed);
+							const reasoning = extractReasoning(event);
 							if (reasoning) {
 								onStatusUpdate?.('Reasoning');
 								pendingReasoning += reasoning;
 							}
 
-							const text = extractText(parsed);
+							const text = extractText(event);
 							if (chunkCount % 50 === 0) {
 								console.log(`[runStream] NC-C:${chunkCount} L:${text.length} hasT:${!!text}`);
 							}
@@ -565,7 +639,7 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 								const filtered = filter.push(text);
 								if (filtered) pendingContent += filtered;
 							}
-						} catch (e) {
+						} catch {
 							// Not valid JSON after all, ignore
 						}
 					}
@@ -583,8 +657,8 @@ async function* runStream(ai: AiRunner, model: string, messages: ChatMessage[], 
 				const payload = leftover.startsWith('data: ') ? leftover.slice(6).trim() : leftover;
 				if (payload && payload !== '[DONE]' && payload.startsWith('{')) {
 					try {
-						const parsed = JSON.parse(payload);
-						const text = extractText(parsed);
+						const parsed: unknown = JSON.parse(payload);
+						const text = extractText(asExtractInput(parsed));
 						if (text) {
 							const filtered = filter.push(text);
 							if (filtered) pendingContent += filtered;
@@ -645,9 +719,29 @@ export function generationStopKey(chatId: number | string, threadId?: number): s
 	return `generation_stopped:${String(chatId)}:${String(threadId ?? 0)}`;
 }
 
+/** Fields of the API errors grammy throws that the formatting checks read. */
+interface ApiErrorShape {
+	error_code?: number;
+	description?: string;
+}
+
+/** Narrow a caught value to the API error fields the formatting checks read. */
+function isApiError(value: unknown): value is ApiErrorShape {
+	if (!isRecord(value)) return false;
+	return (
+		(!('error_code' in value) || typeof value['error_code'] === 'number') &&
+		(!('description' in value) || typeof value['description'] === 'string')
+	);
+}
+
+/** Description of a caught API error for logs, falling back to the value itself. */
+function describeError(e: unknown): string {
+	return isApiError(e) && e.description != null ? String(e.description) : String(e);
+}
+
 /** Telegram rejected the markup rather than the request itself. */
-function isFormattingError(e: any): boolean {
-	if (e?.error_code !== 400) return false;
+function isFormattingError(e: unknown): boolean {
+	if (!isApiError(e) || e.error_code !== 400) return false;
 	const description = String(e.description ?? '');
 	return (
 		description.includes("can't parse entities") ||
@@ -678,12 +772,47 @@ interface EphemeralDeliveryApi {
 }
 
 /**
+ * Raw API methods the optimistic proxy rewrites. Payloads are dynamic by
+ * design: the proxy receives whatever grammy and this module hand it, rebuilds
+ * the payload and forwards it to the matching rich-message method.
+ */
+interface OptimisticApiRaw {
+	sendMessageDraft(...args: unknown[]): Promise<unknown>;
+	sendRichMessageDraft(...args: unknown[]): Promise<unknown>;
+	sendMessage(...args: unknown[]): Promise<unknown>;
+	sendRichMessage(...args: unknown[]): Promise<unknown>;
+	editEphemeralMessageText(...args: unknown[]): Promise<unknown>;
+	answerGuestQuery(...args: unknown[]): Promise<unknown>;
+}
+
+/** Fields the proxy reads from draft / rich message payloads. */
+interface RichSendPayload {
+	text?: string;
+	rich_message?: { markdown?: string };
+	reply_parameters?: unknown;
+	[key: string]: unknown;
+}
+
+/** Fields the proxy reads from guest-query answer payloads. */
+interface GuestQueryPayload {
+	result?: {
+		input_message_content?: {
+			rich_message?: { markdown?: string };
+			message_text?: string;
+			[key: string]: unknown;
+		};
+		[key: string]: unknown;
+	};
+	[key: string]: unknown;
+}
+
+/**
  * Wraps the raw API so every outgoing message is rendered as Telegram rich
  * blocks, falling back to unformatted paragraphs when Telegram rejects the
  * markup. Without the fallback a single malformed table or code fence from the
  * model loses the entire reply.
  */
-function createOptimisticApi(raw: any): any {
+function createOptimisticApi<R extends OptimisticApiRaw>(raw: R): R & OptimisticApiRaw {
 	const smartSanitize = (text: string) => {
 		return text.split('\n').map(line => {
 			if (line.startsWith('> ')) {
@@ -694,9 +823,9 @@ function createOptimisticApi(raw: any): any {
 	};
 
 	return new Proxy(raw, {
-		get(target, prop, receiver) {
+		get(target, prop, receiver): unknown {
 			if (prop === 'sendMessageDraft' || prop === 'sendRichMessageDraft') {
-				return async (data: any, signal?: AbortSignal) => {
+				return async (data: RichSendPayload, signal?: AbortSignal) => {
 					const rawText = data.text || data.rich_message?.markdown || '';
 					// Forward every remaining field (can_stop, keep_on_stop,
 					// message_thread_id, ...) instead of dropping the ones the
@@ -704,7 +833,7 @@ function createOptimisticApi(raw: any): any {
 					const { chat_id, draft_id, text, rich_message, parse_mode, ...rest } = data;
 					void text;
 					void parse_mode;
-					const send = (blocks: any[]) =>
+					const send = (blocks: RichBlock[]) =>
 						target.sendRichMessageDraft(
 							{
 								...rest,
@@ -716,16 +845,16 @@ function createOptimisticApi(raw: any): any {
 						);
 					try {
 						return await send(markdownToRichBlocks(rawText));
-					} catch (e: any) {
+					} catch (e) {
 						if (!isFormattingError(e)) throw e;
-						console.warn(`[OptimisticApi] sendRichMessageDraft rejected the markup, retrying as plain text. ${e.description ?? e}`);
+						console.warn(`[OptimisticApi] sendRichMessageDraft rejected the markup, retrying as plain text. ${describeError(e)}`);
 						return await send(plainTextBlocks(rawText));
 					}
 				};
 			}
 
 			if (prop === 'sendMessage' || prop === 'sendRichMessage') {
-				return async (data: any, signal?: AbortSignal) => {
+				return async (data: RichSendPayload, signal?: AbortSignal) => {
 					const rawText = data.text || data.rich_message?.markdown || '';
 					const { chat_id, text, rich_message, parse_mode, reply_to_message_id, ...rest } = data;
 					void text;
@@ -733,7 +862,7 @@ function createOptimisticApi(raw: any): any {
 					const reply_parameters =
 						data.reply_parameters ||
 						(reply_to_message_id ? { message_id: reply_to_message_id } : undefined);
-					const send = (blocks: any[]) =>
+					const send = (blocks: RichBlock[]) =>
 						target.sendRichMessage(
 							{
 								...rest,
@@ -745,9 +874,9 @@ function createOptimisticApi(raw: any): any {
 						);
 					try {
 						return await send(markdownToRichBlocks(rawText));
-					} catch (e: any) {
+					} catch (e) {
 						if (!isFormattingError(e)) throw e;
-						console.warn(`[OptimisticApi] sendRichMessage rejected the markup, retrying as plain text. ${e.description ?? e}`);
+						console.warn(`[OptimisticApi] sendRichMessage rejected the markup, retrying as plain text. ${describeError(e)}`);
 						return await send(plainTextBlocks(rawText));
 					}
 				};
@@ -755,12 +884,12 @@ function createOptimisticApi(raw: any): any {
 			if (prop === 'editEphemeralMessageText') {
 				// Bot API 10.2: ephemeral group replies are streamed by editing
 				// the message in place, since drafts are private-chat only.
-				return async (data: any, signal?: AbortSignal) => {
+				return async (data: RichSendPayload, signal?: AbortSignal) => {
 					const rawText = data.text || data.rich_message?.markdown || '';
 					const { chat_id, receiver_user_id, ephemeral_message_id, text, rich_message, parse_mode, ...rest } = data;
 					void text;
 					void parse_mode;
-					const edit = (blocks: any[]) =>
+					const edit = (blocks: RichBlock[]) =>
 						target.editEphemeralMessageText(
 							{
 								...rest,
@@ -773,18 +902,18 @@ function createOptimisticApi(raw: any): any {
 						);
 					try {
 						return await edit(markdownToRichBlocks(rawText));
-					} catch (e: any) {
+					} catch (e) {
 						if (!isFormattingError(e)) throw e;
-						console.warn(`[OptimisticApi] editEphemeralMessageText rejected the markup, retrying as plain text. ${e.description ?? e}`);
+						console.warn(`[OptimisticApi] editEphemeralMessageText rejected the markup, retrying as plain text. ${describeError(e)}`);
 						return await edit(plainTextBlocks(rawText));
 					}
 				};
 			}
 			if (prop === 'answerGuestQuery') {
-				return async (data: any, signal?: AbortSignal) => {
+				return async (data: GuestQueryPayload, signal?: AbortSignal) => {
 					const incoming = data?.result?.input_message_content;
 					const markdown: string = incoming?.rich_message?.markdown ?? incoming?.message_text ?? '';
-					const withContent = (input_message_content: any) => ({
+					const withContent = (input_message_content: Record<string, unknown>) => ({
 						...data,
 						result: { ...data.result, input_message_content },
 					});
@@ -801,9 +930,9 @@ function createOptimisticApi(raw: any): any {
 								}),
 								signal,
 							);
-						} catch (e: any) {
-							if (e?.error_code !== 400) throw e;
-							console.warn(`[OptimisticApi] answerGuestQuery rejected the rich content, retrying as MarkdownV2. ${e.description ?? e}`);
+						} catch (e) {
+							if (!isApiError(e) || e.error_code !== 400) throw e;
+							console.warn(`[OptimisticApi] answerGuestQuery rejected the rich content, retrying as MarkdownV2. ${describeError(e)}`);
 						}
 					}
 
@@ -813,8 +942,8 @@ function createOptimisticApi(raw: any): any {
 							withContent({ message_text: converted, parse_mode: 'MarkdownV2' }),
 							signal,
 						);
-					} catch (e: any) {
-						if (e.error_code === 400 && e.description?.includes("can't parse entities")) {
+					} catch (e) {
+						if (isApiError(e) && e.error_code === 400 && e.description?.includes("can't parse entities")) {
 							console.warn(`[OptimisticApi] ${prop} failed, retrying with smart escaped text. Error: ${e.description}`);
 							return await target.answerGuestQuery(
 								withContent({ message_text: smartSanitize(markdown), parse_mode: 'MarkdownV2' }),
@@ -1360,11 +1489,11 @@ export async function streamAiResponseToTelegram(
 	} else {
 		if (task.chatId) {
 			const draftIdOffset = task.updateId || Date.now();
-			const { streamMessage } = streamApi(optimisticRaw);
+			const richStreamApi = streamApi(optimisticRaw);
 			const deltaStream = snapshotsToDeltas(wrappedStream);
 
 			// Both the drafts and the final message flow through the rich-message proxy above.
-			await streamMessage(
+			await richStreamApi.streamMessage(
 				Number(task.chatId),
 				draftIdOffset,
 				deltaStream,
