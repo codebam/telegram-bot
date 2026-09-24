@@ -113,7 +113,7 @@ async function getBusinessOwnerData(
 			const name = result.user?.first_name || 'the business owner';
 			const username = result.user?.username;
 			if (id) {
-				ownerData = { id, name, username };
+				ownerData = { id, name, ...(username === undefined ? {} : { username }) };
 				console.log(`[getBusinessOwnerData] Resolved owner id=${id}. Caching in KV...`);
 				await env.CONVERSATION_HISTORY.put(`active_connection:${id}`, connectionId);
 				await env.CONVERSATION_HISTORY.put(`business_connection:${connectionId}`, JSON.stringify(ownerData));
@@ -227,14 +227,21 @@ async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) 
 	}
 
 	task.userId = historyUserId;
-	task.senderId = ctx.from?.id || ctx.update.guest_message?.from?.id;
-	task.chatId = ctx.chatId?.toString() || ctx.update.guest_message?.chat?.id?.toString();
+	const senderId = ctx.from?.id || ctx.update.guest_message?.from?.id;
+	if (senderId !== undefined) task.senderId = senderId;
+	const chatId = ctx.chatId?.toString() || ctx.update.guest_message?.chat?.id?.toString();
+	if (chatId !== undefined) task.chatId = chatId;
 	task.updateId = ctx.update.update_id;
-	task.messageId = ctx.msg?.message_id || ctx.update.guest_message?.message_id;
-	task.updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
-	task.guestQueryId = ctx.update.guest_message?.guest_query_id;
-	task.businessConnectionId = ctx.businessMessage?.business_connection_id?.toString();
-	task.threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
+	const messageId = ctx.msg?.message_id || ctx.update.guest_message?.message_id;
+	if (messageId !== undefined) task.messageId = messageId;
+	const updateType = Object.keys(ctx.update).find((k) => k !== 'update_id');
+	if (updateType !== undefined) task.updateType = updateType;
+	const guestQueryId = ctx.update.guest_message?.guest_query_id;
+	if (guestQueryId !== undefined) task.guestQueryId = guestQueryId;
+	const businessConnectionId = ctx.businessMessage?.business_connection_id?.toString();
+	if (businessConnectionId !== undefined) task.businessConnectionId = businessConnectionId;
+	const threadId = ctx.msg?.message_thread_id || ctx.update.guest_message?.message_thread_id;
+	if (threadId !== undefined) task.threadId = threadId;
 
 	// Bot API 10.2: group answers are delivered as ephemeral messages so they
 	// are only visible to the user who asked. Business and guest replies have
@@ -284,8 +291,9 @@ async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) 
 
 	if (!charge.ok) {
 		if (ctx.has('business_message') || ctx.has('guest_message')) {
+			const connectionId = ctx.businessMessage?.business_connection_id;
 			await ctx.reply('Insufficient balance. Please go to direct messages and use /load to top up your Stars.', {
-				business_connection_id: ctx.businessMessage?.business_connection_id,
+				...(connectionId === undefined ? {} : { business_connection_id: connectionId }),
 				reply_parameters: { message_id: ctx.msgId },
 			});
 		} else {
@@ -306,8 +314,9 @@ async function chargeStars(ctx: MyContext, task: Task, amountOverride?: number) 
 	task.billingUserId = billingUserId;
 
 	try {
+		const connectionId = ctx.businessMessage?.business_connection_id;
 		await ctx.replyWithChatAction('typing', {
-			business_connection_id: ctx.businessMessage?.business_connection_id,
+			...(connectionId === undefined ? {} : { business_connection_id: connectionId }),
 		});
 	} catch (e) {
 		console.log('[chargeStars] Failed to send chat action (likely not a member):', e);
@@ -343,19 +352,21 @@ function createCommands(): CommandGroup<MyContext> {
 			const isDev = ctx.env.ENVIRONMENT === 'dev';
 			await ctx.reply(HELP_TEXT + (isDev ? '' : '\n\nClick the button below to open the Web App!'), {
 				...ephemeralReply(ctx),
-				reply_markup: isDev
-					? undefined
+				...(isDev
+					? {}
 					: {
-							inline_keyboard: [
-								[
-									{
-										text: 'Open Web App',
-										web_app: { url: 'https://tux-robot.codebam.ca' },
-										style: 'primary',
-									},
+							reply_markup: {
+								inline_keyboard: [
+									[
+										{
+											text: 'Open Web App',
+											web_app: { url: 'https://tux-robot.codebam.ca' },
+											style: 'primary',
+										},
+									],
 								],
-							],
-						},
+							},
+						}),
 			});
 		})
 		.ephemeral({ strict: false });
@@ -628,7 +639,7 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 		task.telegramToken = ctx.env.SECRET_TELEGRAM_API_TOKEN;
 		// Paid directly rather than debited, so there is nothing to refund on
 		// failure through the balance ledger.
-		task.chargedAmount = undefined;
+		delete task.chargedAmount;
 		await ctx.env.STREAM_WORKFLOW.create({ params: task });
 		await ctx.env.CONVERSATION_HISTORY.delete(`task:${payload}`);
 	});
@@ -744,19 +755,21 @@ function setupBot(bot: Bot<MyContext>, env: Environment, executionCtx: Execution
 					input_message_content: {
 						message_text: HELP_TEXT + (isDev ? '' : '\n\nClick the button below to open the Web App!'),
 					},
-					reply_markup: isDev
-						? undefined
+					...(isDev
+						? {}
 						: {
-								inline_keyboard: [
-									[
-										{
-											text: 'Open Web App',
-											url: 'https://tux-robot.codebam.ca',
-											style: 'primary',
-										},
+								reply_markup: {
+									inline_keyboard: [
+										[
+											{
+												text: 'Open Web App',
+												url: 'https://tux-robot.codebam.ca',
+												style: 'primary',
+											},
+										],
 									],
-								],
-							},
+								},
+							}),
 				});
 			} catch (e) {
 				console.error('[guest_message] Failed to answer guest query:', e);
@@ -853,11 +866,13 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 		} catch (e) {
 			console.error('[processTask] Failed to transcribe voice:', e);
 			await botInstance.api.sendMessage(task.chatId!, 'Failed to transcribe voice message.', {
-				business_connection_id: task.businessConnectionId,
-				ephemeral_message_parameters: task.ephemeralReceiverId
-					? { receiver_user_id: task.ephemeralReceiverId }
-					: undefined,
-				reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+				...(task.businessConnectionId === undefined
+					? {}
+					: { business_connection_id: task.businessConnectionId }),
+				...(task.ephemeralReceiverId
+					? { ephemeral_message_parameters: { receiver_user_id: task.ephemeralReceiverId } }
+					: {}),
+				...(task.messageId ? { reply_parameters: { message_id: task.messageId } } : {}),
 			});
 			throw e;
 		}
@@ -877,11 +892,13 @@ async function processTask(task: Task, env: Environment): Promise<void> {
 			bytes[i] = binaryString.charCodeAt(i);
 		}
 		await botInstance.api.sendPhoto(task.chatId!, new InputFile(bytes, 'photo.png'), {
-			business_connection_id: task.businessConnectionId,
-			ephemeral_message_parameters: task.ephemeralReceiverId
-				? { receiver_user_id: task.ephemeralReceiverId }
-				: undefined,
-			reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+			...(task.businessConnectionId === undefined
+				? {}
+				: { business_connection_id: task.businessConnectionId }),
+			...(task.ephemeralReceiverId
+				? { ephemeral_message_parameters: { receiver_user_id: task.ephemeralReceiverId } }
+				: {}),
+			...(task.messageId ? { reply_parameters: { message_id: task.messageId } } : {}),
 		});
 		return;
 	}
@@ -988,7 +1005,7 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 			await step.do('refund and notify', { retries: { limit: 2, delay: '2 seconds', backoff: 'exponential' } }, async () => {
 				if (task.chargedAmount && task.billingUserId) {
 					await accountCredit(this.env, task.billingUserId, task.chargedAmount, 'refund', {
-						model: task.modelId,
+						...(task.modelId === undefined ? {} : { model: task.modelId }),
 						taskType: task.type,
 						description: 'Refund: generation failed',
 					});
@@ -1016,15 +1033,17 @@ export class BotWorkflow extends WorkflowEntrypoint<Environment, Task> {
 				} else if (task.chatId && task.telegramToken) {
 					const api = createBotInstance(task.telegramToken).api;
 					const params = {
-						business_connection_id: task.businessConnectionId,
-						ephemeral_message_parameters: task.ephemeralReceiverId
-							? { receiver_user_id: task.ephemeralReceiverId }
-							: undefined,
+						...(task.businessConnectionId === undefined
+							? {}
+							: { business_connection_id: task.businessConnectionId }),
+						...(task.ephemeralReceiverId
+							? { ephemeral_message_parameters: { receiver_user_id: task.ephemeralReceiverId } }
+							: {}),
 					};
 					try {
 						await api.sendMessage(task.chatId, failureText, {
 							...params,
-							reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+							...(task.messageId ? { reply_parameters: { message_id: task.messageId } } : {}),
 						});
 					} catch (notifyErr) {
 						console.error('[BotWorkflow] Failed to notify user of failure:', notifyErr);
@@ -1151,8 +1170,8 @@ app.post('/workflow', async (c) => {
 	task.userId = userId;
 	task.senderId = userId;
 	task.billingUserId = userId;
-	task.telegramToken = undefined;
-	task.tools = undefined;
+	delete task.telegramToken;
+	delete task.tools;
 	if (Array.isArray(task.history) && task.history.length > MAX_HISTORY_MESSAGES) {
 		task.history = task.history.slice(-MAX_HISTORY_MESSAGES);
 	}
@@ -1292,7 +1311,9 @@ app.all('*', async (c) => {
 					'pre_checkout_query',
 				],
 				drop_pending_updates: true,
-				secret_token: c.env.SECRET_TELEGRAM_WEBHOOK,
+				...(c.env.SECRET_TELEGRAM_WEBHOOK === undefined
+					? {}
+					: { secret_token: c.env.SECRET_TELEGRAM_WEBHOOK }),
 			});
 			// Sync the command menu Telegram clients show above the keyboard. A
 			// failed command sync must not mask a successful webhook registration.

@@ -20,7 +20,7 @@ export const fetchTool = {
 					'User-Agent': 'Mozilla/5.0 (Cloudflare Worker Telegram Bot)',
 					...headers,
 				},
-				body: body ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined,
+				...(body ? { body: typeof body === 'string' ? body : JSON.stringify(body) } : {}),
 			});
 			const text = await res.text();
 			return text.slice(0, 10000);
@@ -392,14 +392,16 @@ except Exception as e:
 
 							console.log(`[CodeWorkspace] Sending document ${fileName} back to user...`);
 							await api.sendDocument(Number(task.chatId), new InputFile(bytes, fileName), {
-								message_thread_id: task.threadId,
-								business_connection_id: task.businessConnectionId,
-								ephemeral_message_parameters: task.ephemeralReceiverId
-									? { receiver_user_id: task.ephemeralReceiverId }
-									: undefined,
+								...(task.threadId === undefined ? {} : { message_thread_id: task.threadId }),
+								...(task.businessConnectionId === undefined
+									? {}
+									: { business_connection_id: task.businessConnectionId }),
+								...(task.ephemeralReceiverId
+									? { ephemeral_message_parameters: { receiver_user_id: task.ephemeralReceiverId } }
+									: {}),
 								caption: `Here is the requested file: \`${fileName}\``,
 								parse_mode: 'MarkdownV2',
-								reply_parameters: task.messageId ? { message_id: task.messageId } : undefined,
+								...(task.messageId ? { reply_parameters: { message_id: task.messageId } } : {}),
 							});
 							await env.CONVERSATION_HISTORY.put(sentKey, 'true', { expirationTtl: 3600 });
 							fileSentMsg = `\nRetrieved and sent ${output_file} back to user via Telegram.`;
